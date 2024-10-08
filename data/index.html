@@ -1,0 +1,156 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Настройка времени</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 20px;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 20px;
+        }
+        table, th, td {
+            border: 1px solid black;
+        }
+        th, td {
+            padding: 10px;
+            text-align: center;
+        }
+        .form-group {
+            margin-bottom: 15px;
+        }
+    </style>
+    <script src="https://code.jquery.com/jquery-3.6.0.min.js"></script>
+    <script>
+        $(document).ready(function() {
+            // Отображение/скрытие поля для плавного включения
+            $('#smoothTransition').change(function() {
+                if ($(this).is(':checked')) {
+                    $('#durationField').show();
+                } else {
+                    $('#durationField').hide();
+                }
+            });
+
+            // Функция для добавления строки в таблицу
+            function addRowToTable(startTime, endTime, smoothTransition, duration) {
+                const smoothText = smoothTransition ? 'Да' : 'Нет';
+                const durationText = smoothTransition ? duration : '—';
+
+                const row = `<tr>
+                    <td>${startTime}</td>
+                    <td>${endTime}</td>
+                    <td>${smoothText}</td>
+                    <td>${durationText}</td>
+                    <td><button class="delete-btn">Удалить</button></td>
+                </tr>`;
+
+                $('#recordTable tbody').append(row);
+            }
+
+            // Загрузка всех записей через AJAX при загрузке страницы
+            function loadRecords() {
+                $.ajax({
+                    url: '/getRecords',
+                    method: 'GET',
+                    success: function(records) {
+                        $.each(records, function(index, record) {
+                            addRowToTable(record.startTime, record.endTime, record.smoothTransition, record.duration);
+                        });
+                    }
+                });
+            }
+
+            // Добавление новой записи через AJAX
+            $('#recordForm').submit(function(event) {
+                event.preventDefault();
+
+                const startTime = $('#startTime').val();
+                const endTime = $('#endTime').val();
+                const smoothTransition = $('#smoothTransition').is(':checked');
+                const duration = smoothTransition ? $('#duration').val() : '—';
+
+                if (startTime && endTime) {
+                    const data = {
+                        startTime: startTime,
+                        endTime: endTime,
+                        smoothTransition: smoothTransition,
+                        duration: duration
+                    };
+
+                    $.ajax({
+                        url: '/addRecord',
+                        method: 'POST',
+                        contentType: 'application/json',
+                        data: JSON.stringify(data),
+                        success: function(record) {
+                            addRowToTable(record.startTime, record.endTime, record.smoothTransition, record.duration);
+                        }
+                    });
+
+                } else {
+                    alert('Заполните все поля времени!');
+                }
+            });
+
+            // Удаление строки из таблицы
+            $('#recordTable').on('click', '.delete-btn', function() {
+                $(this).closest('tr').remove();
+            });
+
+            // Загрузка данных при старте
+            loadRecords();
+        });
+    </script>
+</head>
+<body>
+
+<h1>Настройка времени</h1>
+
+<form id="recordForm">
+    <div class="form-group">
+        <label for="startTime">Начало:</label>
+        <input type="time" id="startTime" name="startTime" required>
+    </div>
+
+    <div class="form-group">
+        <label for="endTime">Конец:</label>
+        <input type="time" id="endTime" name="endTime" required>
+    </div>
+
+    <div class="form-group">
+        <label for="smoothTransition">
+            <input type="checkbox" id="smoothTransition" name="smoothTransition"> Плавное включение
+        </label>
+    </div>
+
+    <div class="form-group" id="durationField" style="display: none;">
+        <label for="duration">Длительность плавного включения (мин):</label>
+        <input type="number" id="duration" name="duration" min="1" max="60">
+    </div>
+
+    <button type="submit">Добавить</button>
+</form>
+
+<table id="recordTable">
+    <thead>
+    <tr>
+        <th>Начало</th>
+        <th>Конец</th>
+        <th>Плавное включение</th>
+        <th>Длительность (мин)</th>
+        <th>Действие</th>
+    </tr>
+    </thead>
+    <tbody>
+    <!-- Записи будут добавляться сюда -->
+    </tbody>
+</table>
+
+</body>
+</html>
