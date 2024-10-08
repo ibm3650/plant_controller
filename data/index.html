@@ -73,7 +73,7 @@
                 const startTime = $('#startTime').val();
                 const endTime = $('#endTime').val();
                 const smoothTransition = $('#smoothTransition').is(':checked');
-                const duration = smoothTransition ? $('#duration').val() : '—';
+                const duration = smoothTransition ? parseInt($('#duration').val()) : 0;
 
                 if (startTime && endTime) {
                     const data = {
@@ -84,7 +84,7 @@
                     };
 
                     $.ajax({
-                        url: '/addRecord',
+                        url: '/add_record',
                         method: 'POST',
                         contentType: 'application/json',
                         data: JSON.stringify(data),
