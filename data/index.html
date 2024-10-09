@@ -57,7 +57,7 @@
             // Загрузка всех записей через AJAX при загрузке страницы
             function loadRecords() {
                 $.ajax({
-                    url: '/getRecords',
+                    url: '/get_records',
                     method: 'GET',
                     success: function(records) {
                         $.each(records, function(index, record) {

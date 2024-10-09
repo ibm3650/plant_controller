@@ -6,6 +6,7 @@
 #include <Wire.h>
 
 
+#define STRNUM_TO_INT(c, pos)    ((*((c) + (pos) ) - '0') * 10 + (*((c)+ (pos) +1) - '0'))
 #define RTC_ADDR 0x68
 #define MAX_WIFI_TRIES  5
 #define SSID "MikroTik-B971FF"
@@ -16,8 +17,10 @@ struct entry_t {
     uint16_t start;
     uint16_t end;
     uint16_t transition_time;
+    //service vars
+    entry_t* next;
+    uint8_t deleted;
 } __attribute__((packed));
-
 
 
 static WiFiEventHandler stationConnectedHandler;
@@ -63,8 +66,6 @@ void wifi_disconnect_cb(const WiFiEventStationModeDisconnected& /*event*/){
 void wifi_connected_cb(const WiFiEventStationModeConnected& /*event*/){
     tries_ctr = 0;
 }
-
-#define STRNUM_TO_INT(c, pos)    ((*((c) + (pos) ) - '0') * 10 + (*((c)+ (pos) +1) - '0'))
 
 uint16_t strtime_to_mins(const char* time_str){
     return STRNUM_TO_INT(time_str, 1) * 60 + STRNUM_TO_INT(time_str, 4);
@@ -116,6 +117,26 @@ int32_t str_to_int(const char* str) {
     return accumulator * sign; // Возвращаем результат с учетом знака
 }
 
+//TODO: Первый байт на страницу епром обозначает, если ли в этой странице свободные ячейки, например помле удаления узла из списка, для дефргаментации и эффективной вставки. такие блоки ищутся перед вставкой
+//TODO: Вставка более чем одного элемента
+//TODO: Кеширование записей EEPROM
+entry_t get_node(uint16_t address=0x0000){
+    entry_t tmp{};
+    random_read(address, reinterpret_cast<uint8_t *>(&tmp), sizeof(entry_t));
+    return tmp;
+}
+
+void insert_node(const entry_t& entry, uint16_t address=0x0000){
+    if(get_node().deleted)return;
+    page_write(address, reinterpret_cast<const uint8_t *>(&entry), sizeof(entry));
+}
+
+void delete_node(uint16_t address=0x0000){
+    entry_t tmp{};
+    random_read(address, reinterpret_cast<uint8_t *>(&tmp), sizeof(entry_t));
+    tmp.deleted = true;
+    page_write(address, reinterpret_cast<const uint8_t *>(&tmp), sizeof(entry_t));
+}
 
 
 void setup() {
@@ -130,10 +151,16 @@ void setup() {
 
     //TODO: оптимизация парсинга json
     //TODO: верификация получнного json для корректного ответа
+    //TODO: защита от повторной вставки
+    //TODO: проверки при добавлении
     server.on("/add_record", []() {
         logRequest();
+        const auto prepare = [](const String& str) -> String {
+            const size_t delim_pos = str.indexOf(':');
+            return str.substring(delim_pos == -1 ? 0 : delim_pos + 1);
+        };
         const auto payload = server.arg("plain");
-        //Оптимистичный ответ
+        //TODO:Оптимистичный ответ
         server.send(200, "application/json", payload);
 
         char values[4][8];
@@ -142,22 +169,38 @@ void setup() {
         size_t ctr = 0;
         while((pos = payload.indexOf(',', pos+1)) != -1){
             const auto tmp = payload.substring(pos_old, pos);
-            strcpy(values[ctr++], tmp.substring(tmp.indexOf(':') == -1 ? 0 : tmp.indexOf(':') + 1).c_str());
+            strcpy(values[ctr++], prepare(tmp).c_str());
             pos_old = pos;
         }
         if(payload.length() - pos_old) {
             const auto tmp = payload.substring(pos_old, payload.length() - 1);
-            strcpy(values[ctr++], tmp.substring(tmp.indexOf(':') == -1 ? 0 : tmp.indexOf(':') + 1).c_str());
+            strcpy(values[ctr++], prepare(tmp).c_str());
         }
+        insert_node({strtime_to_mins(values[0]),
+                strtime_to_mins(values[1]),
+                static_cast<uint16_t>(str_to_int(values[3])),
+                nullptr,
+                false});
 
-        Serial.println(strtime_to_mins(values[0]));
-        Serial.println(strtime_to_mins(values[1]));
-        Serial.println(str_to_int(values[3]));
+
+//        Serial.println(strtime_to_mins(values[0]));
+//        Serial.println(strtime_to_mins(values[1]));
+//        Serial.println(str_to_int(values[3]));
+    });
+    //TODO:получать все записи
+    //TODO:оптимальное формирование json
+    server.on("/get_records", []() {
+        server.send(200, "application/json", R"([{
+                "startTime": "00:34",
+                "endTime": "04:37",
+                "smoothTransition": true,
+                "duration": 54
+        }])");
     });
 
     server.on("/", [](){
         logRequest();
-        File file = SPIFFS.open("/index.html", "r"); //Открываем файл
+        File file = SPIFFS.open("/index.html", "r");
         if(!file)
             return;
         server.streamFile(file, "text/html");
