@@ -2,10 +2,10 @@
 #include <ESP8266WebServer.h>
 #include "pt.h"
 #include "async_wait.h"
+#include "24c32.h"
 #include <Wire.h>
 
-#define EEPROM_ADDR  0x50
-#define PAGE_SIZE   32
+
 #define RTC_ADDR 0x68
 #define MAX_WIFI_TRIES  5
 #define SSID "MikroTik-B971FF"
@@ -32,7 +32,6 @@ void logMessage(const String& message) {
     Serial.println(message);  // Выводим сообщение в последовательный монитор
 }
 
-
 void logRequest() {
     logMessage("Новый запрос:");
     logMessage("Метод: " + String((server.method() == HTTP_GET) ? "GET" : "POST"));
@@ -56,8 +55,6 @@ void logRequest() {
     logMessage("-------------------------");
 }
 
-
-
 void wifi_disconnect_cb(const WiFiEventStationModeDisconnected& /*event*/){
     PT_SCHEDULE_RESUME(&nm_context);
     ++tries_ctr;
@@ -67,26 +64,60 @@ void wifi_connected_cb(const WiFiEventStationModeConnected& /*event*/){
     tries_ctr = 0;
 }
 
-byte decToBcd(byte val) {
-    return (val / 10 * 16) + (val % 10);
+#define STRNUM_TO_INT(c, pos)    ((*((c) + (pos) ) - '0') * 10 + (*((c)+ (pos) +1) - '0'))
+
+uint16_t strtime_to_mins(const char* time_str){
+    return STRNUM_TO_INT(time_str, 1) * 60 + STRNUM_TO_INT(time_str, 4);
 }
 
-byte bcdToDec(byte val) {
-    return (val / 16 * 10) + (val % 16);
+int32_t int_pow(int32_t base, int32_t exp){
+    if (base == 0) {
+        return (exp == 0) ? 1 : 0; // 0^0 = 1, иначе 0
+    }
+    if (exp == 0) {
+        return 1; // любое число в степени 0 = 1
+    }
+
+    int32_t accumulator = 1;
+    bool is_negative_exp = (exp < 0); // Проверка, является ли экспонента отрицательной
+
+    if (is_negative_exp) {
+        exp = -exp; // Преобразование экспоненты в положительную
+    }
+
+    // Вычисление степени
+    for (int32_t i = 0; i < exp; ++i) {
+        accumulator *= base;
+    }
+
+    // Если экспонента была отрицательной, возвращаем 1 / результат
+    return is_negative_exp ? (1 / accumulator) : accumulator;
 }
 
-void setTime(byte hour, byte minute, byte second, byte day, byte month, byte year) {
-    Wire.beginTransmission(RTC_ADDR);
-    Wire.write(0);  // Устанавливаем указатель на 0 регистр
-    Wire.write(decToBcd(second));  // Секунды
-    Wire.write(decToBcd(minute));  // Минуты
-    Wire.write(decToBcd(hour));    // Часы
-    Wire.write(1);                 // День недели (не используется)
-    Wire.write(decToBcd(day));     // День
-    Wire.write(decToBcd(month));   // Месяц
-    Wire.write(decToBcd(year - 2000));  // Год (DS1307 хранит год как два последних символа)
-    Wire.endTransmission();
+int32_t str_to_int(const char* str) {
+    int sign = 1; // Переменная для хранения знака
+    if (*str == '-') {
+        str++;
+        sign = -1; // Если строка начинается с '-', устанавливаем знак в -1
+    }
+
+    int32_t accumulator = 0; // Аккумулятор для результата
+    while (*str) { // Пока не достигнут конец строки
+        if (*str < '0' || *str > '9') {
+            // Если символ не является цифрой, можно обработать ошибку
+            return 0; // Или другое значение, сигнализирующее об ошибке
+        }
+
+        // Преобразуем символ в число и добавляем к аккумулятору
+        accumulator = accumulator * 10 + (*str - '0');
+        str++; // Переход к следующему символу
+    }
+
+    return accumulator * sign; // Возвращаем результат с учетом знака
 }
+
+
+
 void setup() {
     PT_INIT(&nm_context);
     PT_INIT(&web_server_context);
@@ -95,137 +126,50 @@ void setup() {
     SPIFFS.begin();
     stationConnectedHandler = WiFi.onStationModeConnected(wifi_connected_cb);
     disconnectedEventHandler = WiFi.onStationModeDisconnected(wifi_disconnect_cb);
-//    /pinMode(D5, OUTPUT);
-    //setTime(12, 0, 0, 4, 10, 2024);
+
 
     //TODO: оптимизация парсинга json
     //TODO: верификация получнного json для корректного ответа
     server.on("/add_record", []() {
         logRequest();
+        const auto payload = server.arg("plain");
+        //Оптимистичный ответ
+        server.send(200, "application/json", payload);
 
         char values[4][8];
-        const auto payload = server.arg("plain");
         size_t pos = 0;
         size_t pos_old = 1;
         size_t ctr = 0;
         while((pos = payload.indexOf(',', pos+1)) != -1){
             const auto tmp = payload.substring(pos_old, pos);
             strcpy(values[ctr++], tmp.substring(tmp.indexOf(':') == -1 ? 0 : tmp.indexOf(':') + 1).c_str());
-            //Serial.println(tmp.substring(tmp.indexOf(':') == -1 ? 0 : tmp.indexOf(':') + 1));
-
             pos_old = pos;
-            //delay(1000);
         }
         if(payload.length() - pos_old) {
             const auto tmp = payload.substring(pos_old, payload.length() - 1);
             strcpy(values[ctr++], tmp.substring(tmp.indexOf(':') == -1 ? 0 : tmp.indexOf(':') + 1).c_str());
-            //Serial.println(tmp.substring(tmp.indexOf(':') == -1 ? 0 : tmp.indexOf(':') + 1));
         }
 
-        const char* ptr = values[0];
-
-        Serial.println(((ptr[1] - 48) * 10 + (ptr[2] - 48)) * 3600 +  ((ptr[4] - 48) * 10 + (ptr[5] - 48))* 60);
-        //for (const auto& val: values)
-        //    Serial.println(val);
-        server.send(200);
+        Serial.println(strtime_to_mins(values[0]));
+        Serial.println(strtime_to_mins(values[1]));
+        Serial.println(str_to_int(values[3]));
     });
 
     server.on("/", [](){
-        Serial.print("Обработчик корня");
-        logRequest();  // Логгируем данные запроса
+        logRequest();
         File file = SPIFFS.open("/index.html", "r"); //Открываем файл
-        if(!file){ //Проверка наличия
-            Serial.println("Failed to open file for reading");
+        if(!file)
             return;
-        }
         server.streamFile(file, "text/html");
         file.close();
-        server.send(200, "text/html", "<h1>Привет! Это веб-сервер на ESP8266!</h1>");
     });
+
     server.begin();
-
-    //    String data;
-    //    File file = SPIFFS.open("/index.html", "r"); //Открываем файл
-    //    if(!file){ //Проверка наличия
-    //        Serial.println("Failed to open file for reading");
-    //        return;
-    //    }
-    //    data = file.readString(); //Конвертируем данные в нормальное представление
-    //    uint8_t data1[data.length()];
-    //    data.getBytes(data1, data.length()); //168
-    //    file.close(); //Завершаем работу с файлом
-    //    Serial.println(data); //Выводим информацию в монитор порта
 }
 
-void byte_write(uint16_t address, uint8_t data){
-    Wire.beginTransmission(EEPROM_ADDR);
-    Wire.write(address >> 8);
-    Wire.write(address & 0xFF);
-    Wire.write(data);
-    Wire.endTransmission();
-    delay(10);
-}
-
-void page_write(uint16_t address, const uint8_t* data, const size_t length){
-    for (size_t i = 0; i < length / PAGE_SIZE; ++i, address += PAGE_SIZE) {
-        Wire.beginTransmission(EEPROM_ADDR);
-        Wire.write(address >> 8);
-        Wire.write(address & 0xFF);
-        Wire.write(data + i * PAGE_SIZE, PAGE_SIZE);
-        Wire.endTransmission();
-        delay(10);
-        Serial.print("Write page #");
-        Serial.println(i);
-    }
-    if((length % PAGE_SIZE) == 0)
-        return;
-    Serial.print("Write rest [");
-    Serial.print(length % PAGE_SIZE);
-    Serial.println("]");
-    Wire.beginTransmission(EEPROM_ADDR);
-    Wire.write(address >> 8);
-    Wire.write(address & 0xFF);
-    Wire.write(data + (length / PAGE_SIZE) * PAGE_SIZE, length % PAGE_SIZE);
-    Wire.endTransmission();
-    delay(10);
 
 
-//    Wire.beginTransmission(EEPROM_ADDR);
-//    Wire.write(address >> 8);
-//    Wire.write(address & 0xFF);
-//    //Wire.write(reinterpret_cast<const uint8_t*>(data), length);
-//    for (int i = 0; i < length; i++) {
-//        Wire.write(data[i]);
-//    }
-//
-//
-//    Wire.endTransmission();
-//    delay(10);
-}
 
-uint16_t address_read(){
-    uint16_t out = 0;
-    Serial.println(Wire.requestFrom(EEPROM_ADDR, sizeof(out)));
-    Wire.readBytes(reinterpret_cast<char *>(&out), sizeof(out));
-    return out;
-}
-
-void random_read(uint16_t address, uint8_t* buffer, int length){
-    Wire.beginTransmission(EEPROM_ADDR);
-    Wire.write(address >> 8);
-    Wire.write(address & 0xFF);
-    Wire.endTransmission();
-
-    Serial.println(Wire.requestFrom(EEPROM_ADDR, length));
-//    Wire.readBytes(buffer, length);
-    for (int i = 0; i < length; i++) {
-        if (Wire.available()) {
-            buffer[i] = Wire.read(); // Читаем каждый байт данных
-        } else {
-            buffer[i] = 0xFF; // Если чтение не удалось, возвращаем 0xFF
-        }
-    }
-}
 
 
 static PT_THREAD(network_monitor) {
@@ -276,51 +220,11 @@ static PT_THREAD(web_server) {
     PT_END(pt);
 }
 
-
 void loop() {
+
     PT_SCHEDULE(network_monitor, nm_context);
     PT_SCHEDULE(web_server, web_server_context);
-//    byte error, address;
-//    int nDevices;
-//
-//    Serial.println("Scanning...");
-//
-//    nDevices = 0;
-//    for(address = 1; address < 127; address++ )
-//    {
-//        // The i2c_scanner uses the return value of
-//        // the Write.endTransmisstion to see if
-//        // a device did acknowledge to the address.
-//        Wire.beginTransmission(address);
-//        error = Wire.endTransmission();
-//
-//        if (error == 0)
-//        {
-//            Serial.print("I2C device found at address 0x");
-//            if (address<16)
-//                Serial.print("0");
-//            Serial.print(address,HEX);
-//            Serial.println("  !");
-//
-//            nDevices++;
-//        }
-//        else if (error==4)
-//        {
-//            Serial.print("Unknown error at address 0x");
-//            if (address<16)
-//                Serial.print("0");
-//            Serial.println(address,HEX);
-//        }
-//    }
-//    if (nDevices == 0)
-//        Serial.println("No I2C devices found\n");
-//    else
-//        Serial.println("done\n");
-//
-//
-//
-//
-//
+
 //    Wire.beginTransmission(RTC_ADDR);
 //    Wire.write(0);  // Начинаем с регистра 0
 //    Wire.endTransmission();
@@ -336,25 +240,7 @@ void loop() {
 //        Serial.println("}");
 //    }
 ////    delay(1000);           // wait 5 seconds for next scan
-//Serial.println(address_read(), HEX);
-//    const uint8_t dataw[35] = {0x45, 0x33, 0xfc, 0xee, 0x03};
-//   page_write(0x0005, dataw, 35);
-//
-//
-//    const int numBytes = 15; // Количество байт для чтения
-//    byte data[numBytes]; // Массив для хранения считанных данных
-//
-//    // Пример чтения 5 байт с адреса 0x0005
-//    random_read(0x0000, data, numBytes);
-//
-//    Serial.print("Прочитанные данные: ");
-//    for (int i = 0; i < numBytes; i++) {
-//        Serial.print(data[i], HEX); // Выводим данные в шестнадцатеричном формате
-//        Serial.print(" ");
-//    }
-//    Serial.println();
-//
-//    delay(1000); // Задержка между циклами
+
 
 
 }
