@@ -4,7 +4,7 @@
 #include "async_wait.h"
 #include "24c32.h"
 #include <Wire.h>
-
+#include <WiFiUdp.h>
 
 #define STRNUM_TO_INT(c, pos)    ((*((c) + (pos) ) - '0') * 10 + (*((c)+ (pos) +1) - '0'))
 #define RTC_ADDR 0x68
@@ -20,12 +20,14 @@ struct entry_t {
     //service vars
     entry_t* next;
     uint8_t deleted;
+    //uint8_t deleted : 1;//TODO: оптимизировать побитно
 } __attribute__((packed));
 
 
 static WiFiEventHandler stationConnectedHandler;
 static WiFiEventHandler disconnectedEventHandler;
 static ESP8266WebServer server(80);
+static WiFiUDP UDP;
 static pt nm_context;
 static pt web_server_context;
 static uint8_t tries_ctr = 0;
@@ -120,6 +122,8 @@ int32_t str_to_int(const char* str) {
 //TODO: Первый байт на страницу епром обозначает, если ли в этой странице свободные ячейки, например помле удаления узла из списка, для дефргаментации и эффективной вставки. такие блоки ищутся перед вставкой
 //TODO: Вставка более чем одного элемента
 //TODO: Кеширование записей EEPROM
+//TODO: удаление записей EEPROM
+//TODO: полная реализация sntp по стандарту rfc
 entry_t get_node(uint16_t address=0x0000){
     entry_t tmp{};
     random_read(address, reinterpret_cast<uint8_t *>(&tmp), sizeof(entry_t));
@@ -138,6 +142,17 @@ void delete_node(uint16_t address=0x0000){
     page_write(address, reinterpret_cast<const uint8_t *>(&tmp), sizeof(entry_t));
 }
 
+//TODO: работа с BCD классом
+//TODO: работа с EEPROM классом
+//TODO:const char fmt[] = "sqrt(2) = %f";
+//int sz = snprintf(NULL, 0, fmt, sqrt(2));
+//char buf[sz + 1]; // note +1 for terminating null byte
+//snprintf(buf, sizeof buf, fmt, sqrt(2));
+
+int minutes_to_time(uint16_t minutes, char* out, size_t buffer_size) {
+    //TODO:sprintf_s???
+    return snprintf(out, buffer_size, R"("%02d:%02d")", minutes / 60, minutes % 60);
+}
 
 void setup() {
     PT_INIT(&nm_context);
@@ -145,6 +160,7 @@ void setup() {
     Serial.begin(115200);
     Wire.begin();
     SPIFFS.begin();
+    UDP.begin(1337);
     stationConnectedHandler = WiFi.onStationModeConnected(wifi_connected_cb);
     disconnectedEventHandler = WiFi.onStationModeDisconnected(wifi_disconnect_cb);
 
@@ -153,6 +169,7 @@ void setup() {
     //TODO: верификация получнного json для корректного ответа
     //TODO: защита от повторной вставки
     //TODO: проверки при добавлении
+    //TODO: пв sprintf правильные литералы аргументов или вообще std::format
     server.on("/add_record", []() {
         logRequest();
         const auto prepare = [](const String& str) -> String {
@@ -189,13 +206,38 @@ void setup() {
     });
     //TODO:получать все записи
     //TODO:оптимальное формирование json
+    //TODO:использовать по возможности статичекое выделение памяти
+    //TODO:строковыке литералы во флеш памяти
     server.on("/get_records", []() {
-        server.send(200, "application/json", R"([{
-                "startTime": "00:34",
-                "endTime": "04:37",
-                "smoothTransition": true,
-                "duration": 54
-        }])");
+        const auto  entry = get_node();
+        const char* fmt = R"([{
+                "startTime": "%02d:%02d",
+                "endTime": "%02d:%02d",
+                "smoothTransition": %s,
+                "duration": %d
+        }])";
+        Serial.println(fmt);
+        const size_t buffer_size = snprintf(nullptr, 0, fmt,
+                                      entry.start / 60,
+                                      entry.start % 60,
+                                      entry.end / 60,
+                                      entry.end % 60,
+                                      entry.transition_time == 0 ? "false" : "true",
+                                      entry.transition_time);
+
+        String buffer(static_cast<const char*>(nullptr)); //TODO:чтобы не выделял память в куче зря. SSO?
+        buffer.reserve(buffer_size + 1);//TODO:проверит есть ли выделение памяти
+        snprintf(buffer.begin(), //TODO: потому что в ардуино эта функция возвращает указатель на буфер неконстантным
+                 buffer_size + 1,
+                 fmt,
+                 entry.start / 60,
+                 entry.start % 60,
+                 entry.end / 60,
+                 entry.end % 60,
+                 entry.transition_time == 0 ? "false" : "true",
+                 entry.transition_time);
+
+        server.send(200, "application/json", buffer.c_str());
     });
 
     server.on("/", [](){
@@ -263,11 +305,132 @@ static PT_THREAD(web_server) {
     PT_END(pt);
 }
 
+enum CORRECTION{
+    NO_WARN,
+    LM_61,
+    LM_59,
+    ALARM
+};
+
+enum VERSION{
+    RESERVED,
+    SYMMETRIC_ACTIVE,
+    SYMMETRIC_PASSIVE,
+    CLIENT,
+    SERVER,
+    BROADCAST,
+    RESERVED0,
+    RESERVED1
+};
+
+
+
+struct sntp_msg {
+    uint8_t correction : 2;
+    uint8_t version : 3;
+    uint8_t mode : 3;
+    uint8_t stratum;
+    uint8_t Poll;
+    int8_t precision;
+    int32_t root_delay;
+    uint32_t root_dispersion;
+    uint32_t reference_id;
+    uint64_t reference_timestamp;
+    uint64_t originate_timestamp;
+    uint64_t receive_timestamp;
+    uint64_t transmit_timestamp;
+} __attribute__((packed));
+
+
+String timestamp_to_string(uint64_t timestamp) {
+    // SNTP использует временные метки в формате "с 1900 года"
+    const uint64_t seconds_since_1900 = 2208988800ULL; // Время в секундах с 1 января 1900 года
+    uint64_t seconds_since_1970 = timestamp - seconds_since_1900;
+
+    time_t t = seconds_since_1970; // Конвертация в стандартный формат времени
+    char buffer[20]; // Буфер для форматированной строки
+    strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", localtime(&t)); // Форматирование
+    return String(buffer);
+}
+
+// Функция для печати sntp_msg с расшифровкой значений
+void print_sntp_msg(const sntp_msg& msg) {
+    Serial.println("SNTP Message:");
+    Serial.print("  Correction: "); Serial.println(msg.correction);
+    Serial.print("  Version: "); Serial.println(msg.version);
+    Serial.print("  Mode: ");
+    switch (msg.mode) {
+        case 0: Serial.println("Reserved"); break;
+        case 1: Serial.println("Symmetric Active"); break;
+        case 2: Serial.println("Symmetric Passive"); break;
+        case 3: Serial.println("Client"); break;
+        case 4: Serial.println("Server"); break;
+        case 5: Serial.println("Broadcast"); break;
+        case 6: Serial.println("Reserved for NTP control message"); break;
+        case 7: Serial.println("Reserved for private use"); break;
+        default: Serial.println("Unknown"); break;
+    }
+    Serial.print("  Stratum: "); Serial.println(msg.stratum);
+    Serial.print("  Poll: "); Serial.println(msg.Poll);
+    Serial.print("  Precision: "); Serial.println(msg.precision);
+    Serial.print("  Root Delay: "); Serial.println(msg.root_delay);
+    Serial.print("  Root Dispersion: "); Serial.println(msg.root_dispersion);
+    Serial.print("  Reference ID: 0x"); Serial.println(msg.reference_id, HEX);
+    Serial.print("  Reference Timestamp: "); Serial.println(timestamp_to_string(msg.reference_timestamp));
+    Serial.print("  Originate Timestamp: "); Serial.println(timestamp_to_string(msg.originate_timestamp));
+    Serial.print("  Receive Timestamp: "); Serial.println(timestamp_to_string(msg.receive_timestamp));
+    Serial.print("  Transmit Timestamp: "); Serial.println(timestamp_to_string(msg.transmit_timestamp));
+}
+
+
+//TODO: калбеки для асинзронной задержки и поллинг нтуреннего цикла
+void sntp(){
+    sntp_msg message{.version = 4,
+                     .mode = 3};
+    //msg.transmit_timestamp = htonll(current_time_in_ntp_format()); //TODO;учет времени отправки важен и обязателен
+    //msg.transmit_timestamp = htonll(current_time_in_ntp_format()); //TODO;коррекция sntp
+//    Serial.println(UDP.beginPacket("pool.ntp.org", 123));
+//    Serial.println(UDP.write(reinterpret_cast<uint8_t*>(&message), sizeof(message)));
+//    Serial.println(UDP.endPacket());
+    Serial.printf("Sending SNTP request to pool.ntp.org on port 123\n");
+    if (UDP.beginPacket("pool.ntp.org", 123) == 1) {
+        Serial.printf("Packet started successfully.\n");
+        if (UDP.write(reinterpret_cast<uint8_t*>(&message), sizeof(message)) > 0) {
+            Serial.printf("Packet written successfully. Size: %d bytes\n", sizeof(message));
+            if (!UDP.endPacket()) {
+                Serial.println("Failed to send UDP packet");
+                return;
+            }
+            Serial.println("Packet sent.\n");
+        } else {
+            Serial.println("Failed to write to packet.\n");
+            return;
+        }
+    } else {
+        Serial.println("Failed to start packet.\n");
+        return;
+    }
+    async_wait delay(1000);
+    int packetSize = 0;
+    while(delay && (packetSize = UDP.parsePacket()) == 0);
+
+    Serial.println(packetSize);
+    if (packetSize) {
+        int len = UDP.read(reinterpret_cast<uint8_t*>(&message), sizeof(message));
+        Serial.println(packetSize);
+        Serial.printf("Received packet from %s:%d\n", UDP.remoteIP().toString().c_str(), UDP.remotePort());
+        Serial.printf("Message len : %d\n", len);
+        print_sntp_msg(message);
+    }
+}
+
+
+
 void loop() {
 
     PT_SCHEDULE(network_monitor, nm_context);
     PT_SCHEDULE(web_server, web_server_context);
-
+    if(WiFi.status()==WL_CONNECTED)sntp();
 //    Wire.beginTransmission(RTC_ADDR);
 //    Wire.write(0);  // Начинаем с регистра 0
 //    Wire.endTransmission();
@@ -282,7 +445,7 @@ void loop() {
 //
 //        Serial.println("}");
 //    }
-////    delay(1000);           // wait 5 seconds for next scan
+  //  delay(1000);
 
 
 
