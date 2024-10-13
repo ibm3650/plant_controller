@@ -5,21 +5,22 @@
 #include "24c32.h"
 #include <Wire.h>
 #include <WiFiUdp.h>
+#include <ctime>
 
 #define STRNUM_TO_INT(c, pos)    ((*((c) + (pos) ) - '0') * 10 + (*((c)+ (pos) +1) - '0'))
-#define RTC_ADDR 0x68
+
 #define MAX_WIFI_TRIES  5
 #define SSID "MikroTik-B971FF"
 #define PASSWORD "pussydestroyer228"
 
-
+//TODO: mutex for i2c Wire
 struct entry_t {
-    uint16_t start;
-    uint16_t end;
-    uint16_t transition_time;
+    uint16_t start ;//: 11;
+    uint16_t end; //: 11;
+    uint16_t transition_time ;//: 9;
     //service vars
     entry_t* next;
-    uint8_t deleted;
+    uint8_t deleted;// : 1;
     //uint8_t deleted : 1;//TODO: оптимизировать побитно
 } __attribute__((packed));
 
@@ -36,6 +37,7 @@ static uint8_t tries_ctr = 0;
 void logMessage(const String& message) {
     Serial.println(message);  // Выводим сообщение в последовательный монитор
 }
+
 
 void logRequest() {
     logMessage("Новый запрос:");
@@ -126,20 +128,20 @@ int32_t str_to_int(const char* str) {
 //TODO: полная реализация sntp по стандарту rfc
 entry_t get_node(uint16_t address=0x0000){
     entry_t tmp{};
-    random_read(address, reinterpret_cast<uint8_t *>(&tmp), sizeof(entry_t));
+    read_random(address, reinterpret_cast<uint8_t *>(&tmp), sizeof(entry_t));
     return tmp;
 }
 
 void insert_node(const entry_t& entry, uint16_t address=0x0000){
     if(get_node().deleted)return;
-    page_write(address, reinterpret_cast<const uint8_t *>(&entry), sizeof(entry));
+    write_page(address, reinterpret_cast<const uint8_t *>(&entry), sizeof(entry));
 }
 
 void delete_node(uint16_t address=0x0000){
     entry_t tmp{};
-    random_read(address, reinterpret_cast<uint8_t *>(&tmp), sizeof(entry_t));
+    read_random(address, reinterpret_cast<uint8_t *>(&tmp), sizeof(entry_t));
     tmp.deleted = true;
-    page_write(address, reinterpret_cast<const uint8_t *>(&tmp), sizeof(entry_t));
+    write_page(address, reinterpret_cast<const uint8_t *>(&tmp), sizeof(entry_t));
 }
 
 //TODO: работа с BCD классом
@@ -154,6 +156,42 @@ int minutes_to_time(uint16_t minutes, char* out, size_t buffer_size) {
     return snprintf(out, buffer_size, R"("%02d:%02d")", minutes / 60, minutes % 60);
 }
 
+#define DS1307_ADDRESS 0x68  // Адрес DS1307
+
+// Функция для преобразования десятичного числа в BCD (Binary Coded Decimal)
+
+uint8_t dec_to_bcd(uint8_t val) {
+    return ((val / 10 * 16) + (val % 10));
+}
+
+// Функция для установки времени на DS1307
+void set_time(uint8_t sec, uint8_t min, uint8_t hour, uint8_t day_of_week, uint8_t day_of_month, uint8_t month, uint16_t year) {
+    // Переводим значения времени в формат BCD
+    uint8_t year_short = year % 100;  // DS1307 использует только последние две цифры года
+    sec = dec_to_bcd(sec);
+    min = dec_to_bcd(min);
+    hour = dec_to_bcd(hour);
+    day_of_week = dec_to_bcd(day_of_week);
+    day_of_month = dec_to_bcd(day_of_month);
+    month = dec_to_bcd(month);
+    year_short = dec_to_bcd(year_short);
+
+    // Начинаем передачу данных на DS1307
+    Wire.beginTransmission(DS1307_ADDRESS);
+    Wire.write(0x00);  // Адрес регистра секунд (начало записи с 0x00)
+
+    // Записываем данные
+    Wire.write(sec);            // секунды
+    Wire.write(min);            // минуты
+    Wire.write(hour);           // часы
+    Wire.write(day_of_week);    // день недели (1 - понедельник, 7 - воскресенье)
+    Wire.write(day_of_month);   // день месяца
+    Wire.write(month);          // месяц
+    Wire.write(year_short);     // год (последние две цифры)
+
+    // Завершаем передачу
+    Wire.endTransmission();
+}
 void setup() {
     PT_INIT(&nm_context);
     PT_INIT(&web_server_context);
@@ -163,7 +201,7 @@ void setup() {
     UDP.begin(1337);
     stationConnectedHandler = WiFi.onStationModeConnected(wifi_connected_cb);
     disconnectedEventHandler = WiFi.onStationModeDisconnected(wifi_disconnect_cb);
-
+   // set_time(0, 30, 17, 5, 11, 10, 2024);
 
     //TODO: оптимизация парсинга json
     //TODO: верификация получнного json для корректного ответа
@@ -330,7 +368,7 @@ struct sntp_msg {
     uint8_t version : 3;
     uint8_t mode : 3;
     uint8_t stratum;
-    uint8_t Poll;
+    uint8_t poll;
     int8_t precision;
     int32_t root_delay;
     uint32_t root_dispersion;
@@ -350,7 +388,7 @@ String timestamp_to_string(uint64_t timestamp) {
     time_t t = seconds_since_1970; // Конвертация в стандартный формат времени
     char buffer[20]; // Буфер для форматированной строки
     strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", localtime(&t)); // Форматирование
-    return String(buffer);
+    return {buffer};
 }
 
 // Функция для печати sntp_msg с расшифровкой значений
@@ -371,7 +409,7 @@ void print_sntp_msg(const sntp_msg& msg) {
         default: Serial.println("Unknown"); break;
     }
     Serial.print("  Stratum: "); Serial.println(msg.stratum);
-    Serial.print("  Poll: "); Serial.println(msg.Poll);
+    Serial.print("  Poll: "); Serial.println(msg.poll);
     Serial.print("  Precision: "); Serial.println(msg.precision);
     Serial.print("  Root Delay: "); Serial.println(msg.root_delay);
     Serial.print("  Root Dispersion: "); Serial.println(msg.root_dispersion);
@@ -424,17 +462,74 @@ void sntp(){
     }
 }
 
-
-
+#include "ds1307.h"
+uint32_t bcd_to_dec(const uint8_t* bytes, size_t length){
+    uint32_t accumulator{};
+    for (size_t i = 0; i < length; ++i) {
+        uint8_t tmp = (bytes[i] >> 4);
+        assert(tmp <= 9);
+        accumulator = accumulator * 10 + tmp;
+        tmp = (bytes[i] & 0x0F);
+        assert(tmp <= 9);
+        accumulator = accumulator * 10 + tmp;
+    }
+    return accumulator;
+}
 void loop() {
+    ds1307::time(nullptr);
+//    PT_SCHEDULE(network_monitor, nm_context);
+//    PT_SCHEDULE(web_server, web_server_context);
+//    if(WiFi.status()==WL_CONNECTED) sntp();
+    Wire.beginTransmission(ds1307::RTC_ADDR);
+    Wire.write(0);  // Начинаем с регистра 0
+    Wire.endTransmission();
+    Serial.println(Wire.requestFrom(ds1307::RTC_ADDR, 8U));
+    uint8_t buffer[8];
+    Wire.readBytes(buffer,8);
+    uint64_t accumulator{};
+    int Days_Since[] = {0, 31, 59, 90, 120, 151,
+                        181, 212, 243, 273, 304, 334};
+//    //sec
+//    uint8_t tmp = Wire.read();
+//    accumulator += ::bcd_to_dec(&tmp, 1);
+//    //min
+//    tmp = Wire.read();
+//    accumulator += ::bcd_to_dec(&tmp, 1) * 60;
+//    //hour
+//    tmp = Wire.read();
+//    accumulator += ::bcd_to_dec(&tmp, 1) * 3600;
+//    //day
+//    tmp = Wire.read();//skip day
+//    //date
+//    tmp = Wire.read();
+//    accumulator += ::bcd_to_dec(&tmp, 1) * 86400;
+//    //month
+//    tmp = Wire.read();
+//    accumulator += ::bcd_to_dec(&tmp, 1) * 86400;
+//    //year
+//    tmp = Wire.read();
+    int Year_Type = (buffer[6] % 4);
+//    if (Year_Type == 0 && buffer[5] >= 3){
+//        Leap_Year_Correction_Factor = 1;
+//    }
+//    else
+//    {
+//        Leap_Year_Correction_Factor = 0;
+//    }
+Serial.printf("%02d:%02d:%02d\n", ::bcd_to_dec(buffer , 1),::bcd_to_dec(buffer + 1, 1),::bcd_to_dec(buffer + 2, 1));
+    size_t years_ue = ::bcd_to_dec(buffer + 6, 1) + 2000 - 1970;
+    years_ue = years_ue * 365.25;
 
-    PT_SCHEDULE(network_monitor, nm_context);
-    PT_SCHEDULE(web_server, web_server_context);
-    if(WiFi.status()==WL_CONNECTED)sntp();
-//    Wire.beginTransmission(RTC_ADDR);
-//    Wire.write(0);  // Начинаем с регистра 0
-//    Wire.endTransmission();
-//    Serial.println(Wire.requestFrom(RTC_ADDR, 8));
+    years_ue += Days_Since[::bcd_to_dec(buffer + 5, 1) - 1];
+    years_ue += ::bcd_to_dec(buffer + 4, 1) - 1;
+
+    years_ue += (Year_Type == 0 && ::bcd_to_dec(buffer + 5, 1) >= 3) ? 1 : 0;
+
+    years_ue *= 86400;
+    years_ue += ::bcd_to_dec(buffer, 1);
+    years_ue += ::bcd_to_dec(buffer+1, 1) *60;
+    years_ue += ::bcd_to_dec(buffer+2, 1) *60 * 60;
+    Serial.print("Year: ");Serial.println(years_ue);
 //    while(Wire.available()){
 //        Serial.print("Got DS byte: ");
 //        uint8_t ret = Wire.read();
@@ -445,7 +540,7 @@ void loop() {
 //
 //        Serial.println("}");
 //    }
-  //  delay(1000);
+    delay(1000);
 
 
 
