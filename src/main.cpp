@@ -1,3 +1,4 @@
+
 #include <Arduino.h>
 #include <ESP8266WebServer.h>
 #include "pt.h"
@@ -14,7 +15,8 @@
 #define MAX_WIFI_TRIES  5
 #define SSID "MikroTik-B971FF"
 #define PASSWORD "pussydestroyer228"
-
+//#define SSID "S21"
+//#define PASSWORD "rxzn8231"
 //TODO: mutex for i2c Wire
 struct entry_t {
     uint16_t start ;//: 11;
