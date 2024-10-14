@@ -107,7 +107,7 @@ int32_t str_to_int(const char* str) {
 //TODO: Вставка более чем одного элемента
 //TODO: Кеширование записей EEPROM
 //TODO: удаление записей EEPROM
-//TODO: полная реализация sntp по стандарту rfc
+//TODO: полная реализация time по стандарту rfc
 entry_t get_node(uint16_t address=0x0000){
     entry_t tmp{};
     read_random(address, reinterpret_cast<uint8_t *>(&tmp), sizeof(entry_t));
@@ -280,11 +280,12 @@ static PT_THREAD(web_server) {
 void loop() {
     PT_SCHEDULE(network_monitor, nm_context);
     PT_SCHEDULE(web_server, web_server_context);
-    if(WiFi.status()==WL_CONNECTED) {
-        Serial.print("RTC: ");
-        Serial.println(ds1307::time(nullptr));
-        sntp();
-    }
+//    if(WiFi.status()==WL_CONNECTED) {
+//        Serial.print("RTC: ");
+//        Serial.println(ds1307::time(nullptr));
+//        Serial.print("NTP: ");
+//        Serial.println(ntp::time());
+//    }
 }
 
 

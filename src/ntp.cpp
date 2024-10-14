@@ -17,16 +17,16 @@ int minutes_to_time(uint16_t minutes, char* out, size_t buffer_size) {
     return snprintf(out, buffer_size, R"("%02d:%02d")", minutes / 60, minutes % 60);
 }
 
-enum CORRECTION{
-    NO_WARN,
+enum CORRECTION : uint8_t {
+    NO_WARN = 0,
     LM_61,
     LM_59,
-    ALARM
+    NOT_SYNC
 };
 
 
-enum VERSION{
-    RESERVED,
+enum MODE: uint8_t {
+    RESERVED = 0,
     SYMMETRIC_ACTIVE,
     SYMMETRIC_PASSIVE,
     CLIENT,
@@ -92,17 +92,28 @@ void print_sntp_msg(const sntp_msg& msg) {
         default: Serial.println("Unknown"); break;
     }
     Serial.print("  Stratum: "); Serial.println(msg.stratum);
-    Serial.print("  Poll: "); Serial.println(msg.poll);
-    Serial.print("  Precision: "); Serial.println(msg.precision);
-    Serial.print("  Root Delay: "); Serial.printf("[%d] ,  %d.%d\n",
+    Serial.print("  Poll: "); Serial.println(msg.poll >= 0 ? 1UL << msg.poll : 1.0 / (1UL << -msg.poll));
+    Serial.print("  Precision: "); Serial.println(msg.precision >= 0 ? 1UL << msg.precision : 1.0 / (1UL << -msg.precision));
+    Serial.print("  Root Delay: "); Serial.printf("[%d] ,  %.3f\n",
                                                   msg.root_delay,
 //                                                  (ntohl(msg.root_delay) & 0xFFFF0000) >> 16,
 //                                                  ntohl(msg.root_delay) & 0x0000FFFF
-                                                  ntohs(msg.root_delay & 0x0000FFFF),
-                                                  ( ntohs((msg.root_delay & 0xFFFF0000) >> 16)) *1000 / 65536
+                                                  ntohs(msg.root_delay & 0x0000FFFF) * 1000.0 +
+                                                  ( ntohs((msg.root_delay & 0xFFFF0000) >> 16)) * 1000.0 / 65536.0
                                                   );
-    Serial.print("  Root Dispersion: "); Serial.println(msg.root_dispersion);
-    Serial.print("  Reference ID: 0x"); Serial.println(msg.reference_id, HEX);
+    Serial.print("  Root Dispersion: "); Serial.printf("[%d] ,  %.3f\n",
+                                                       msg.root_dispersion,
+//                                                  (ntohl(msg.root_delay) & 0xFFFF0000) >> 16,
+//                                                  ntohl(msg.root_delay) & 0x0000FFFF
+                                                       ntohs(msg.root_dispersion & 0x0000FFFF) * 1000.0+
+                                                       ( ntohs((msg.root_dispersion & 0xFFFF0000) >> 16)) * 1000.0 / 65536.0
+    );
+    if(msg.stratum >= 2){
+
+        Serial.print("  Reference ID: "); Serial.println(IPAddress(msg.reference_id).toString());
+//        Serial.print("  Reference ID: 0x"); Serial.println(msg.reference_id, HEX);
+    }
+
     Serial.print("  Reference Timestamp: ");
     Serial.println(timestamp_to_string(msg.reference_timestamp));
     Serial.print("  Originate Timestamp: "); Serial.println(timestamp_to_string(msg.originate_timestamp));
@@ -120,11 +131,12 @@ static WiFiUDP UDP;
 bool isudp = false;
 //TODO: коррекция SNTP, согласование с сервером
 //TODO: калбеки для асинзронной задержки и поллинг нтуреннего цикла
-void sntp(){
-    sntp_msg message{.correction=3,.version = 4,
-            .mode = 3, .poll=6, .precision=-6};
+std::time_t ntp::time(){
+    sntp_msg message{.correction = NOT_SYNC,
+                     .version = 4,
+                     .mode = CLIENT};
    // msg.transmit_timestamp = htonll(current_time_in_ntp_format()); //TODO;учет времени отправки важен и обязателен
-    //msg.transmit_timestamp = htonll(current_time_in_ntp_format()); //TODO;коррекция sntp
+    //msg.transmit_timestamp = htonll(current_time_in_ntp_format()); //TODO;коррекция time
 //    Serial.println(UDP.beginPacket("pool.ntp.org", 123));
 //    Serial.println(UDP.write(reinterpret_cast<uint8_t*>(&message), sizeof(message)));
 //    Serial.println(UDP.endPacket());
@@ -137,27 +149,27 @@ void sntp(){
     IPAddress ip;
     ip.fromString("129.250.35.250");
     uint8_t buf[48] = {0b11100011};
-    Serial.printf("Sending SNTP request to pool.ntp.org on port 123\n");
+   // Serial.printf("Sending SNTP request to pool.ntp.org on port 123\n");
     if (UDP.beginPacket(ip, 123) == 1) {
 
    // if (UDP.beginPacket("pool.ntp.org", 123) == 1) {
-        Serial.printf("Packet started successfully.\n");
+      //  Serial.printf("Packet started successfully.\n");
 
-        if ((packetSize = UDP.write(buf, 48)) > 0) {
-        ///if ((packetSize = UDP.write(reinterpret_cast<uint8_t*>(&message), sizeof(message))) > 0) {
-            Serial.printf("Packet written successfully. Size: %d bytes\n",packetSize);
+       // if ((packetSize = UDP.write(buf, 48)) > 0) {
+        if ((packetSize = UDP.write(reinterpret_cast<uint8_t*>(&message), sizeof(message))) > 0) {
+         //   Serial.printf("Packet written successfully. Size: %d bytes\n",packetSize);
             if (!UDP.endPacket()) {
-                Serial.println("Failed to send UDP packet");
-                return;
+            //    Serial.println("Failed to send UDP packet");
+                return -1;
             }
-            Serial.println("Packet sent.\n");
+         //   Serial.println("Packet sent.\n");
         } else {
-            Serial.println("Failed to write to packet.\n");
-            return;
+        //    Serial.println("Failed to write to packet.\n");
+            return -1;
         }
     } else {
-        Serial.println("Failed to start packet.\n");
-        return;
+      //  Serial.println("Failed to start packet.\n");
+        return -1;
     }
     async_wait delayt(1000);
 
@@ -169,7 +181,7 @@ void sntp(){
 //            return;
 //        }
     }
-    delay(1000);
+  //  delay(1000);
     //packetSize = UDP.parsePacket();
     Serial.println(packetSize);
     if (packetSize) {
@@ -177,14 +189,18 @@ void sntp(){
         uint32_t unix = ((_merge(buf + 40) << 16) | _merge(buf + 42)) - 2208988800UL;
         //int len = UDP.read(reinterpret_cast<uint8_t*>(&message), sizeof(message));
         //Serial.println(packetSize);
-        Serial.printf("Received packet from %s:%d\n", UDP.remoteIP().toString().c_str(), UDP.remotePort());
-        Serial.printf("Message len : %d\n", len);
+      //  Serial.printf("Received packet from %s:%d\n", UDP.remoteIP().toString().c_str(), UDP.remotePort());
+      //  Serial.printf("Message len : %d\n", len);
 
 //       for (int i = 47; i >= 0 ; --i) {
 //            reinterpret_cast<uint8_t*>(&message)[47-i] = buf[i];
 //        }
 memcpy(&message, buf, 48);
-        print_sntp_msg(message);
+        message.receive_timestamp = ntohl(message.receive_timestamp & 0xFFFFFFFF);
+        // timestamp = (timestamp & 0xFFFFFFFF00000000)>>32;
+        const uint64_t seconds_since_1900 = 2208988800ULL; // Время в секундах с 1 января 1900 года
+        return message.receive_timestamp - seconds_since_1900;
+      //  print_sntp_msg(message);
         //print_sntp_msg(*reinterpret_cast<sntp_msg*>(buf));
        //Serial.print("NTP: ");Serial.println(unix);
        //Serial.print("NTP: ");Serial.println(ntohll(reinterpret_cast<sntp_msg*>(buf)->transmit_timestamp) - 2208988800UL);
@@ -194,4 +210,5 @@ memcpy(&message, buf, 48);
       // Serial.print("NTP: ");Serial.println(message.transmit_timestamp - 2208988800UL);
     }
     //WiFiUDP::stopAll();
+    return -1;
 }

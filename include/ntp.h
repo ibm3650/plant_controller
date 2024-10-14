@@ -4,4 +4,8 @@
 
 #pragma once
 
-void sntp();
+#include <ctime>
+
+namespace ntp {
+    std::time_t time();
+};
