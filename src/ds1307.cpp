@@ -35,7 +35,7 @@ namespace{
         }
         return bytes_read;
     }
-};
+} // local namespace
 
 
 #define DEBUG(var, name)    {\
@@ -45,6 +45,29 @@ Serial.println(var);\
 
 #define DEBUG_N(var)  DEBUG(var, nullptr)
 
+
+
+inline bool is_24h(uint8_t hours_reg){
+    return hours_reg & (1 << 6);
+}
+
+
+uint8_t get_hours24(uint8_t hours_reg) {
+    if (!(hours_reg & (1 << 6))) {
+        return ::bcd_to_dec(&hours_reg, 1);
+    }
+    const bool is_pm = hours_reg & (1 << 5);
+    hours_reg &= 0x1F;
+    hours_reg = ::bcd_to_dec(&hours_reg, 1);
+    if (is_pm) {
+        return hours_reg == 12 ? hours_reg : hours_reg + 12;
+    }
+    return hours_reg == 12 ? 0 : hours_reg;
+}
+
+static uint8_t dec_to_bcd(uint8_t val) {
+    return ((val / 10 * 16) + (val % 10));
+}
 enum class FORMAT: bool{H24 = true, H12 = false};
 //TODO: учет остальых позиций а также изначально установленного знгачения
 void set_format(FORMAT fmt){
@@ -54,11 +77,23 @@ void set_format(FORMAT fmt){
     Wire.write(0x02);
     if (static_cast<bool>(fmt)) {
         // Устанавливаем 24-часовой формат: сбросить бит 6
-        hours &= ~(1 << 6);
+        hours = dec_to_bcd(get_hours24(hours));
+        //hours &= ~(1 << 6);
     } else {
         // Устанавливаем 12-часовой формат: установить бит 6
+        const uint8_t h24 = get_hours24(hours);
+        if(h24 == 12 || h24 == 0)
+            hours = 12;
+        else if(h24 < 12)
+            hours = h24;
+        else
+            hours = h24 - 12;
+        hours = dec_to_bcd(hours);
+        if(h24 >= 12)
+            hours |= (1 << 5); // PM
+        else
+            hours &= ~(1 << 5); // AM
         hours |= (1 << 6);
-
         // Если хотите установить AM/PM режим, измените бит 5:
         // hour_reg |= (1 << 5);  // PM
         // hour_reg &= ~(1 << 5); // AM
@@ -67,7 +102,7 @@ void set_format(FORMAT fmt){
     //Wire.write((hours & ~static_cast<uint8_t>(fmt)) | static_cast<uint8_t>(fmt));
     Wire.endTransmission();
 }
-
+#define TIMEZONE    3
 //TODO: учитывать 24\12 формат
 //TODO: установка в 12часовом ормате треьует конвертации
 std::time_t ds1307::time( std::time_t* arg ){
@@ -77,58 +112,34 @@ std::time_t ds1307::time( std::time_t* arg ){
     if(::read_memspace(0x00, buffer, datetime_registers_len) != datetime_registers_len)
         return static_cast<std::time_t>(-1);
 
-    uint8_t dbg;
-    DEBUG(::bcd_to_dec(buffer, 1), "Seconds: ");
-    DEBUG(::bcd_to_dec(buffer + 1, 1), "Minutes: ");
-    dbg = buffer[2] & (1 << 6);
-    uint8_t hours = ::bcd_to_dec(buffer + 2, 1);
-    DEBUG(buffer[2], "Hours raw: ");
-    if(dbg){
-        DEBUG(buffer[2] & (1 << 5) ? "PM" : "AM", "In 12-hours format: ");
-        hours = (buffer[2] & 0x0F) + ((buffer[2] >> 4) & 0x01) * 10;
-        if (hours == 0) {
-            hours = 12;  // 00h в 12-часовом формате — это 12 AM
-        }
-        set_format(FORMAT::H24);
-    }else{
-        set_format(FORMAT::H12);
-    }
-    DEBUG(hours, "Hours: ");
-    DEBUG(::bcd_to_dec(buffer + 3, 1), "Day of week: ");
-    DEBUG(::bcd_to_dec(buffer + 4, 1), "Date: ");
-    DEBUG(::bcd_to_dec(buffer + 5, 1), "Month: ");
-    DEBUG(::bcd_to_dec(buffer + 6, 1) + 2000, "Year: ");
-    return -1;
-    std::time_t accumulator{};
+    //DEBUG(::bcd_to_dec(buffer, 1), "Seconds: ");
+    //DEBUG(::bcd_to_dec(buffer + 1, 1), "Minutes: ");
 
-    std::tm date;
-    uint8_t tmp = Wire.read();
-    accumulator += ::bcd_to_dec(&tmp, 1);
+    //set_format(FORMAT::H24);
 
-    tmp = Wire.read();
-    accumulator += ::bcd_to_dec(&tmp, 1) * 60;
+    uint8_t const hours = get_hours24(buffer[2]);
+    const uint16_t year = ::bcd_to_dec(buffer + 6, 1) + 2000;
+    uint8_t const month  =::bcd_to_dec(buffer + 5, 1);
+   // DEBUG(hours, "Hours: ");
+   // DEBUG(::bcd_to_dec(buffer + 3, 1), "Day of week: ");
+  //  DEBUG(::bcd_to_dec(buffer + 4, 1), "Date: ");
+   // DEBUG(month, "Month: ");
+  //  DEBUG(year, "Year: ");
+    const int Days_Since[] = {0, 31, 59, 90, 120, 151,
+                        181, 212, 243, 273, 304, 334};
 
-    tmp = Wire.read();
-    accumulator += ::bcd_to_dec(&tmp, 1) * 3600;
+    std::time_t years_ue = (year - 1970) * 365 + (year - 1970) / 4;
 
-    tmp = Wire.read();//skip day
+    years_ue += Days_Since[month - 1];
+    years_ue += ::bcd_to_dec(buffer + 4, 1) - 1;
 
-    tmp = Wire.read();
-    accumulator += ::bcd_to_dec(&tmp, 1) * 86400;
+    years_ue += (!(year % 4) && month >= 3) ? 1 : 0;
 
-    tmp = Wire.read();
-    accumulator += ::bcd_to_dec(&tmp, 1) * 86400;
-//    while(Wire.available()){
-//        Serial.print("Got DS byte: ");
-//        uint8_t ret = Wire.read();
-//        Serial.print("{ ");
-//        Serial.print((ret & 0xF0) >> 4);
-//        Serial.print(", ");
-//        Serial.print((ret & 0x0F));
-//
-//        Serial.println("}");
-//    }
-return {};
+    years_ue *= 86400;
+    years_ue += ::bcd_to_dec(buffer, 1);
+    years_ue += ::bcd_to_dec(buffer+1, 1) * 60;
+    years_ue += hours * 60 * 60;
+    return years_ue - TIMEZONE * 3600;
 }
 
 
