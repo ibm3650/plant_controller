@@ -102,7 +102,6 @@ void set_format(FORMAT fmt){
     //Wire.write((hours & ~static_cast<uint8_t>(fmt)) | static_cast<uint8_t>(fmt));
     Wire.endTransmission();
 }
-#define TIMEZONE    3
 //TODO: учитывать 24\12 формат
 //TODO: установка в 12часовом ормате треьует конвертации
 std::time_t ds1307::time( std::time_t* arg ){

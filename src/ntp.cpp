@@ -36,7 +36,15 @@ enum MODE: uint8_t {
     RESERVED1
 };
 
-
+uint8_t reverseBits(uint8_t num, uint8_t bitCount) {
+    uint8_t reversed = 0;
+    for (uint8_t i = 0; i < bitCount; ++i) {
+        if ((num & (1 << i))) {
+            reversed |= 1 << ((bitCount - 1) - i);
+        }
+    }
+    return reversed;
+}
 struct sntp_msg {
     uint8_t correction : 2;
     uint8_t version : 3;
@@ -77,9 +85,10 @@ String timestamp_to_string(uint64_t timestamp) {
 // Функция для печати sntp_msg с расшифровкой значений
 void print_sntp_msg(const sntp_msg& msg) {
     Serial.println("SNTP Message:");
-    Serial.print("  Correction: "); Serial.println(msg.correction);
-    Serial.print("  Version: "); Serial.println(msg.version);
-    Serial.print("  Mode: ");
+    Serial.print("#  Correction: "); Serial.println(msg.correction);
+    Serial.print("#  Version: "); Serial.println(msg.version);
+    Serial.print("#  Mode: ");
+
     switch (msg.mode) {
         case 0: Serial.println("Reserved"); break;
         case 1: Serial.println("Symmetric Active"); break;
@@ -92,28 +101,30 @@ void print_sntp_msg(const sntp_msg& msg) {
         default: Serial.println("Unknown"); break;
     }
     Serial.print("  Stratum: "); Serial.println(msg.stratum);
-    Serial.print("  Poll: "); Serial.println(msg.poll >= 0 ? 1UL << msg.poll : 1.0 / (1UL << -msg.poll));
-    Serial.print("  Precision: "); Serial.println(msg.precision >= 0 ? 1UL << msg.precision : 1.0 / (1UL << -msg.precision));
-    Serial.print("  Root Delay: "); Serial.printf("[%d] ,  %.3f\n",
+    Serial.print("  Poll: "); Serial.print(msg.poll >= 0 ? 1UL << msg.poll : (double)1.0 / (1UL << -msg.poll));Serial.println(" sec");
+    Serial.print("#  Precision: "); Serial.println(msg.precision >= 0 ? 1UL << msg.precision : (double)1.0 / (1UL << -msg.precision));
+    Serial.print("  Root Delay: "); Serial.printf("[%d] ,  %.3f sec\n",
                                                   msg.root_delay,
 //                                                  (ntohl(msg.root_delay) & 0xFFFF0000) >> 16,
 //                                                  ntohl(msg.root_delay) & 0x0000FFFF
                                                   ntohs(msg.root_delay & 0x0000FFFF) * 1000.0 +
-                                                  ( ntohs((msg.root_delay & 0xFFFF0000) >> 16)) * 1000.0 / 65536.0
+                                                  ( ntohs((msg.root_delay & 0xFFFF0000) >> 16))  / 65536.0
                                                   );
-    Serial.print("  Root Dispersion: "); Serial.printf("[%d] ,  %.3f\n",
+    Serial.print("  Root Dispersion: "); Serial.printf("[%d] ,  %.3f\n sec",
                                                        msg.root_dispersion,
-//                                                  (ntohl(msg.root_delay) & 0xFFFF0000) >> 16,
-//                                                  ntohl(msg.root_delay) & 0x0000FFFF
-                                                       ntohs(msg.root_dispersion & 0x0000FFFF) * 1000.0+
-                                                       ( ntohs((msg.root_dispersion & 0xFFFF0000) >> 16)) * 1000.0 / 65536.0
+                                                       ntohs(msg.root_dispersion & 0x0000FFFF) * 1000.0 +
+                                                       (ntohs((msg.root_dispersion & 0xFFFF0000) >> 16))  / 65536.0
     );
     if(msg.stratum >= 2){
 
         Serial.print("  Reference ID: "); Serial.println(IPAddress(msg.reference_id).toString());
 //        Serial.print("  Reference ID: 0x"); Serial.println(msg.reference_id, HEX);
     }
-
+    else if(msg.stratum == 0){
+        //4 ascii symbols. kiss code}
+    }
+    else if(msg.stratum == 1) {//4 ascii symbols. list from IANA         }
+    }
     Serial.print("  Reference Timestamp: ");
     Serial.println(timestamp_to_string(msg.reference_timestamp));
     Serial.print("  Originate Timestamp: "); Serial.println(timestamp_to_string(msg.originate_timestamp));
@@ -135,6 +146,19 @@ std::time_t ntp::time(){
     sntp_msg message{.correction = NOT_SYNC,
                      .version = 4,
                      .mode = CLIENT};
+
+//    uint8_t ntpResponse[] = {
+//            0x34, 0x02, 0x03, 0xE8, 0x00, 0x00, 0x10, 0x10,
+//            0x00, 0x00, 0x08, 0x8A, 0x81, 0xFA, 0x23, 0xDE,
+//            0xEA, 0xB8, 0xE7, 0x89, 0x90, 0xF3, 0x7F, 0x44,
+//            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+//            0xEA, 0xB8, 0xEE, 0x7B, 0xE7, 0xEA, 0x35, 0x21,
+//            0xEA, 0xB8, 0xEE, 0x7B, 0xE7, 0xEB, 0xBD, 0x8A
+//    };
+//
+//    memcpy(&message, ntpResponse, 48);
+//    print_sntp_msg(message);
+//    delay(1000);
    // msg.transmit_timestamp = htonll(current_time_in_ntp_format()); //TODO;учет времени отправки важен и обязателен
     //msg.transmit_timestamp = htonll(current_time_in_ntp_format()); //TODO;коррекция time
 //    Serial.println(UDP.beginPacket("pool.ntp.org", 123));
@@ -195,7 +219,15 @@ std::time_t ntp::time(){
 //       for (int i = 47; i >= 0 ; --i) {
 //            reinterpret_cast<uint8_t*>(&message)[47-i] = buf[i];
 //        }
+//        for (int i = 0; i < 48; ++i) {
+//            Serial.print(buf[i], HEX);
+//            Serial.print(" ");
+//        }
+
+
 memcpy(&message, buf, 48);
+       // print_sntp_msg(message);
+       // delay(1000);
         message.receive_timestamp = ntohl(message.receive_timestamp & 0xFFFFFFFF);
         // timestamp = (timestamp & 0xFFFFFFFF00000000)>>32;
         const uint64_t seconds_since_1900 = 2208988800ULL; // Время в секундах с 1 января 1900 года

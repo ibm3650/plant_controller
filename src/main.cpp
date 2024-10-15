@@ -35,6 +35,8 @@ static ESP8266WebServer server(80);
 //static WiFiUDP UDP;
 static pt nm_context;
 static pt web_server_context;
+static pt led_context;
+static pt entriess_context;
 static uint8_t tries_ctr = 0;
 
 
@@ -126,17 +128,33 @@ void delete_node(uint16_t address=0x0000){
     write_page(address, reinterpret_cast<const uint8_t *>(&tmp), sizeof(entry_t));
 }
 
+entry_t cache_entries[4]{};
+size_t cache_ctr = 0;
+static bool state = false;
+static size_t del_t = 0;
 
-
+void set_led(bool state_, size_t transition = 0) {
+    state = state_;
+    del_t = transition / 0xFF;
+    PT_SCHEDULE_RESUME(&led_context);
+}
+//TODO: Кеширование всех записей EEPROM
+//TODO: Сортировка кешированных записей EEPROM
 void setup() {
     PT_INIT(&nm_context);
     PT_INIT(&web_server_context);
+    PT_INIT(&led_context);
+    PT_INIT(&entriess_context);
     Serial.begin(115200);
     Wire.begin();
     SPIFFS.begin();
+    cache_entries[cache_ctr++] = get_node();
+    cache_entries[cache_ctr].start -= cache_entries[0].transition_time;
+    cache_entries[cache_ctr].end -= cache_entries[0].transition_time;
     //UDP.begin(1337);
     stationConnectedHandler = WiFi.onStationModeConnected(wifi_connected_cb);
     disconnectedEventHandler = WiFi.onStationModeDisconnected(wifi_disconnect_cb);
+    pinMode(D5, OUTPUT);
     //TODO: оптимизация парсинга json
     //TODO: верификация получнного json для корректного ответа
     //TODO: защита от повторной вставки
@@ -211,6 +229,8 @@ void setup() {
         server.send(200, "application/json", buffer.c_str());
     });
     server.on("/", [](){
+        set_led(state, 1000);
+        state = !state;
         logRequest();
         File file = SPIFFS.open("/index.html", "r");
         if(!file)
@@ -249,6 +269,7 @@ static PT_THREAD(network_monitor) {
                         Serial.print("Connecting to WIFI [");
                         Serial.print(SSID);
                         Serial.print("] #");
+
                         Serial.println(tries_ctr);
                         delay(1 * 1000);
                     }
@@ -262,29 +283,91 @@ static PT_THREAD(network_monitor) {
 //TODO: Вариант не работает с режимом точки доступа
 //TODO: Не ждет подключения к ТД или поднятия хотспоста
 //TODO: Остановка сервера при простое переподключения
+
 static PT_THREAD(web_server) {
     PT_BEGIN(pt);
-                while (true) {
-                    server.handleClient();
-                    PT_YIELD(pt);
-                }
+    while (true) {
+        server.handleClient();
+        PT_YIELD(pt);
+    }
     PT_END(pt);
 }
 
 
+static PT_THREAD(led_state){
+    static uint8_t i = 0xFF;
+    static bool current_state = false;
+    static async_wait delay{0};
+
+    if (state == current_state) {
+        PT_EXIT(pt);
+}
+
+    if(i == 0xFF) {
+        delay(del_t);
+        i = 0;
+    }
 
 
+    PT_BEGIN(pt);
+    for (; i < 0xFF; ++i) {
+        analogWrite(D5, current_state ? i : 0xFF - i);
+        PT_YIELD_UNTIL(pt, !delay);
+        delay(del_t);
+    }
+    current_state = state;
+    PT_END(pt);
+}
 
+static PT_THREAD(entries_processing){
+    PT_BEGIN(pt);
+    while(true){
+        for(size_t i = 0; i < cache_ctr; ++i){
+            if(cache_entries[i].start == 0 && cache_entries[i].end == 0)
+                continue;
+            if(ds1307::time(nullptr) >= cache_entries[i].start && ds1307::time(nullptr) <= cache_entries[i].end){
+                set_led(true, cache_entries[i].transition_time);
+            }
+        }
+        PT_YIELD(pt);
+    }
+    PT_END(pt);
+}
+
+//void led_state(bool state, size_t transition = 0){
+//    static bool current_state = false;
+//    if (state == current_state)
+//        return;
+//    if(transition == 0) {
+//        analogWrite(D5, state ? 0xFF : 0x00);
+//        current_state = state;
+//        return;
+//    }
+//
+//    const size_t del_t = transition / 0xFF;
+//    for (int i = 0; i < 0xFF; ++i) {
+//        analogWrite(D5, current_state ? i : 0xFF - i);
+//        delay(del_t);
+//    }
+//    current_state = state;
+//}
 
 
 void loop() {
+    //static bool current_state = false;
     PT_SCHEDULE(network_monitor, nm_context);
     PT_SCHEDULE(web_server, web_server_context);
+    PT_SCHEDULE(led_state, led_context);
+    PT_SCHEDULE(entries_processing, entriess_context);
+
+    //led_state(current_state, 1000);
+   // current_state = !current_state ;
+   // delay(1000);
 //    if(WiFi.status()==WL_CONNECTED) {
 //        Serial.print("RTC: ");
 //        Serial.println(ds1307::time(nullptr));
 //        Serial.print("NTP: ");
-//        Serial.println(ntp::time());
+//       Serial.println(ntp::time());
 //    }
 }
 

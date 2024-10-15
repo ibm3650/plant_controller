@@ -126,7 +126,7 @@ struct pt {
  * \hideinitializer
  */
 #define PT_END(pt) LC_END((pt)->lc); PT_YIELD_FLAG = 0; \
-                   PT_INIT(pt); return PT_ENDED; }
+                   PT_INIT(pt);(pt)->is_stoped=true; return PT_ENDED; }
 
 /** @} */
 
