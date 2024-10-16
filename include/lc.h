@@ -44,8 +44,8 @@
  *
  * Local continuations form the basis for implementing protothreads. A
  * local continuation can be <i>set</i> in a specific function to
- * capture the state of the function. After a local continuation has
- * been set can be <i>resumed</i> in order to restore the state of the
+ * capture the led_state of the function. After a local continuation has
+ * been set can be <i>resumed</i> in order to restore the led_state of the
  * function at the point where the local continuation was set.
  *
  *
@@ -64,7 +64,7 @@
  * Initialize a local continuation.
  *
  * This operation initializes the local continuation, thereby
- * unsetting any previously set continuation state.
+ * unsetting any previously set continuation led_state.
  *
  * \hideinitializer
  */
@@ -73,9 +73,9 @@
 /**
  * Set a local continuation.
  *
- * The set operation saves the state of the function at the point
+ * The set operation saves the led_state of the function at the point
  * where the operation is executed. As far as the set operation is
- * concerned, the state of the function does <b>not</b> include the
+ * concerned, the led_state of the function does <b>not</b> include the
  * call-stack or local (automatic) variables, but only the program
  * counter and such CPU registers that needs to be saved.
  *
@@ -87,7 +87,7 @@
  * Resume a local continuation.
  *
  * The resume operation resumes a previously set local continuation, thus
- * restoring the state in which the function was when the local
+ * restoring the led_state in which the function was when the local
  * continuation was set. If the local continuation has not been
  * previously set, the resume operation does nothing.
  *
