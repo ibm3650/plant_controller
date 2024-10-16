@@ -207,7 +207,7 @@ std::time_t ntp::time(){
     }
   //  delay(1000);
     //packetSize = UDP.parsePacket();
-    Serial.println(packetSize);
+   // Serial.println(packetSize);
     if (packetSize) {
         int len = UDP.read(buf, sizeof(message));
         uint32_t unix = ((_merge(buf + 40) << 16) | _merge(buf + 42)) - 2208988800UL;
@@ -226,8 +226,8 @@ std::time_t ntp::time(){
 
 
 memcpy(&message, buf, 48);
-       // print_sntp_msg(message);
-       // delay(1000);
+      //  print_sntp_msg(message);
+      // delay(1000);
         message.receive_timestamp = ntohl(message.receive_timestamp & 0xFFFFFFFF);
         // timestamp = (timestamp & 0xFFFFFFFF00000000)>>32;
         const uint64_t seconds_since_1900 = 2208988800ULL; // Время в секундах с 1 января 1900 года

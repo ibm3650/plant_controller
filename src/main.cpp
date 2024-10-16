@@ -104,19 +104,24 @@ int32_t str_to_int(const char* str) {
 
     return accumulator * sign; // Возвращаем результат с учетом знака
 }
-
+entry_t cache_entries[4]{};
+size_t cache_ctr = 0;
 //TODO: Первый байт на страницу епром обозначает, если ли в этой странице свободные ячейки, например помле удаления узла из списка, для дефргаментации и эффективной вставки. такие блоки ищутся перед вставкой
 //TODO: Вставка более чем одного элемента
 //TODO: Кеширование записей EEPROM
 //TODO: удаление записей EEPROM
 //TODO: полная реализация time по стандарту rfc
 entry_t get_node(uint16_t address=0x0000){
+    return cache_entries[0];
     entry_t tmp{};
     read_random(address, reinterpret_cast<uint8_t *>(&tmp), sizeof(entry_t));
     return tmp;
 }
 
 void insert_node(const entry_t& entry, uint16_t address=0x0000){
+    Serial.println("Inserting");
+    Serial.println(entry.start);
+    cache_entries[cache_ctr] = entry;cache_ctr++;return;
     if(get_node().deleted)return;
     write_page(address, reinterpret_cast<const uint8_t *>(&entry), sizeof(entry));
 }
@@ -128,12 +133,15 @@ void delete_node(uint16_t address=0x0000){
     write_page(address, reinterpret_cast<const uint8_t *>(&tmp), sizeof(entry_t));
 }
 
-entry_t cache_entries[4]{};
-size_t cache_ctr = 0;
+
+
 static bool state = false;
 static size_t del_t = 0;
-
+//TODO: учесть, что переход может произойти раньше чем счетчик достигнет максимума
 void set_led(bool state_, size_t transition = 0) {
+   // if (state == state_) {
+   //     return;
+   // }
     state = state_;
     del_t = transition / 0xFF;
     PT_SCHEDULE_RESUME(&led_context);
@@ -155,6 +163,7 @@ void setup() {
     stationConnectedHandler = WiFi.onStationModeConnected(wifi_connected_cb);
     disconnectedEventHandler = WiFi.onStationModeDisconnected(wifi_disconnect_cb);
     pinMode(D5, OUTPUT);
+    //set_led(1, 1000);
     //TODO: оптимизация парсинга json
     //TODO: верификация получнного json для корректного ответа
     //TODO: защита от повторной вставки
@@ -198,7 +207,10 @@ void setup() {
     //TODO:оптимальное формирование json
     //TODO:использовать по возможности статичекое выделение памяти
     //TODO:строковыке литералы во флеш памяти
-    server.on("/get_records", []() {
+    //TODO:использовать кеш
+    //Оптимизировать эту функцию
+    server.on("/get_records",  []() {
+        //auto const   entry = cache_entries[0];
         const auto  entry = get_node();
         const char* fmt = R"([{
                 "startTime": "%02d:%02d",
@@ -206,7 +218,7 @@ void setup() {
                 "smoothTransition": %s,
                 "duration": %d
         }])";
-        Serial.println(fmt);
+
         const size_t buffer_size = snprintf(nullptr, 0, fmt,
                                       entry.start / 60,
                                       entry.start % 60,
@@ -226,11 +238,12 @@ void setup() {
                  entry.end % 60,
                  entry.transition_time == 0 ? "false" : "true",
                  entry.transition_time);
+        Serial.println(buffer.c_str());
         server.send(200, "application/json", buffer.c_str());
     });
     server.on("/", [](){
-        set_led(state, 1000);
-        state = !state;
+
+       //state = !state;
         logRequest();
         File file = SPIFFS.open("/index.html", "r");
         if(!file)
@@ -283,6 +296,7 @@ static PT_THREAD(network_monitor) {
 //TODO: Вариант не работает с режимом точки доступа
 //TODO: Не ждет подключения к ТД или поднятия хотспоста
 //TODO: Остановка сервера при простое переподключения
+//TODO: Работа с i2c тоже протопоток
 
 static PT_THREAD(web_server) {
     PT_BEGIN(pt);
@@ -293,40 +307,70 @@ static PT_THREAD(web_server) {
     PT_END(pt);
 }
 
-
+//TODO: Ощибка если статус меняется во время выполнения предыдущего запроса
 static PT_THREAD(led_state){
     static uint8_t i = 0xFF;
     static bool current_state = false;
     static async_wait delay{0};
-
-    if (state == current_state) {
-        PT_EXIT(pt);
-}
-
     if(i == 0xFF) {
+        if(state == current_state)
+            PT_EXIT(pt);
         delay(del_t);
         i = 0;
     }
 
-
+    //Serial.printf("LED VALUE: %d#%d\n", i,__LINE__);
     PT_BEGIN(pt);
     for (; i < 0xFF; ++i) {
-        analogWrite(D5, current_state ? i : 0xFF - i);
+       // Serial.printf("LED VALUE: %d#%d\n", i,__LINE__);
+        analogWrite(D5, current_state ? 0xFF - i : i);
         PT_YIELD_UNTIL(pt, !delay);
         delay(del_t);
+        Serial.printf("LED VALUE: %d#%d\n", i, current_state);
     }
+//                if(state == current_state) {
+//                    current_state = !current_state;
+//                    PT_YIELD(pt);
+//                }
+  //  Serial.printf("LED VALUE: %d#%d\n", i,__LINE__);
     current_state = state;
+                //PT_EXIT(pt);
     PT_END(pt);
 }
 
+////функция которая кооректирует время ds1307 по времени из ntp раз в сутки
+//void f(){
+//    static time_t last_time = 0;
+//    if(ds1307::time(nullptr) - last_time >= 24 * 60 * 60){
+//        ds1307::set_time(ntp::time());
+//        last_time = ds1307::time(nullptr);
+//    }
+//}
+
 static PT_THREAD(entries_processing){
+    const std::time_t time_tmp = ntp::time() + TIMEZONE * 60 * 60;
+    //const std::time_t time_tmp = ds1307::time(nullptr) + TIMEZONE * 60 * 60;
+    const auto curr_min = std::gmtime(&time_tmp)->tm_hour * 60 + std::gmtime(&time_tmp)->tm_min;
+  //  Serial.println(std::ctime(&time_tmp));
+   // Serial.println(ds1307::time(nullptr));
+    //Serial.println(curr_min);
+   // Serial.println(time_tmp);
     PT_BEGIN(pt);
+
     while(true){
         for(size_t i = 0; i < cache_ctr; ++i){
             if(cache_entries[i].start == 0 && cache_entries[i].end == 0)
                 continue;
-            if(ds1307::time(nullptr) >= cache_entries[i].start && ds1307::time(nullptr) <= cache_entries[i].end){
-                set_led(true, cache_entries[i].transition_time);
+            //TODO: оптимизировать/переписать/помечать задачу как запущенную или отпавлять в конец списка
+
+            if(curr_min  >= (cache_entries[i].end - cache_entries[i].transition_time)){
+                set_led(false, cache_entries[i].transition_time * 60 * 1000);
+                Serial.println("LED OFF");
+                continue;
+            }
+            if(curr_min  >= (cache_entries[i].start - cache_entries[i].transition_time)){
+                set_led(true, cache_entries[i].transition_time * 60 * 1000);
+                Serial.println("LED ON");
             }
         }
         PT_YIELD(pt);
@@ -355,11 +399,16 @@ static PT_THREAD(entries_processing){
 
 void loop() {
     //static bool current_state = false;
-    PT_SCHEDULE(network_monitor, nm_context);
-    PT_SCHEDULE(web_server, web_server_context);
     PT_SCHEDULE(led_state, led_context);
+    PT_SCHEDULE(network_monitor, nm_context);
+    if(WiFi.status() != WL_CONNECTED)
+        return;
+    PT_SCHEDULE(web_server, web_server_context);
+    //TODO: отвязать от сети
     PT_SCHEDULE(entries_processing, entriess_context);
 
+
+   // Serial.println(entriess_context.is_stoped);
     //led_state(current_state, 1000);
    // current_state = !current_state ;
    // delay(1000);
