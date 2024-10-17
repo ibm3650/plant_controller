@@ -6,21 +6,7 @@
 #include <WiFiUdp.h>
 #include <Arduino.h>
 
-struct sntp_msg_t {
-    uint8_t correction : 2;
-    uint8_t version : 3;
-    uint8_t mode : 3;
-    uint8_t stratum;
-    uint8_t poll;
-    int8_t precision;
-    int32_t root_delay;
-    uint32_t root_dispersion;
-    uint32_t reference_id;
-    uint64_t reference_timestamp;
-    uint64_t originate_timestamp;
-    uint64_t receive_timestamp;
-    uint64_t transmit_timestamp;
-} __attribute__((packed));
+
 
 static WiFiUDP UDP;
 
@@ -234,4 +220,70 @@ memcpy(&message, buf, 48);
     }
     //WiFiUDP::stopAll();
     return -1;
+}
+
+ntp::ntp_client::ntp_client(std::string_view address, uint16_t port) noexcept {
+    set_server(address, port);
+}
+
+void ntp::ntp_client::set_server(std::string_view address, uint16_t port) noexcept {
+    address_ = address;
+    port_ = port;
+    is_initialized_ = false;
+    if(!socket_.begin(LISTENING_PORT)) {
+        Serial.println("#NTP No UDP sockets available to use");
+        return;
+    }
+    is_initialized_ = true;
+}
+
+bool ntp::ntp_client::sync() noexcept {
+    if (!socket_.beginPacket(address_.c_str(), port_)) {
+        Serial.println("#NTP Failed to start packet");
+        return false;
+    }
+    message_.mode = static_cast<uint8_t>(MODE::CLIENT);
+    message_.version = 4;
+    message_.correction = static_cast<uint8_t>(CORRECTION::NOT_SYNC);
+    size_t packet_size = socket_.write(reinterpret_cast<uint8_t*>(&message_), sizeof(message_));
+    if (packet_size == 0) {
+        Serial.println("#NTP Failed to write to packet");
+        return false;
+    }
+    if (!socket_.endPacket()) {
+        Serial.println("#NTP Failed to send UDP packet");
+        return false;
+    }
+    delay_timer_(connection_timeout_);
+    while (delay_timer_ && (packet_size = UDP.parsePacket()) < sizeof(message_));
+    if (packet_size < sizeof(message_)) {
+        Serial.println("#NTP Timeout waiting for response or packet size is less than expected");
+        return false;
+    }
+    const int len = socket_.read(reinterpret_cast<uint8_t*>(&message_), sizeof(message_));
+    last_update_ = millis();
+    return true;
+}
+
+ntp::UPDATE_STATUS ntp::ntp_client::sync_poll() noexcept {
+    if (is_synchronized()) {
+        return UPDATE_STATUS::NO_UPDATE;
+    }
+    return (sync() ? UPDATE_STATUS::UPDATE_SUCCESS : UPDATE_STATUS::UPDATE_FAILED);
+}
+
+bool ntp::ntp_client::is_synchronized() const noexcept {
+    return (last_update_ + update_interval_ * 1000 >= millis()) && last_update_ != 0;
+}
+
+void ntp::ntp_client::set_timezone_offset(uint8_t offset) noexcept {
+    time_zone_offset_ = offset;
+}
+
+void ntp::ntp_client::set_timeout(size_t timeout) noexcept {
+    connection_timeout_ = timeout;
+}
+
+void ntp::ntp_client::set_update_interval(size_t interval) noexcept {
+    update_interval_ = interval;
 }
