@@ -5,47 +5,8 @@
 #include "async_wait.h"
 #include <WiFiUdp.h>
 #include <Arduino.h>
-//TODO: работа с BCD классом
-//TODO: работа с EEPROM классом
-//TODO:const char fmt[] = "sqrt(2) = %f";
-//int sz = snprintf(NULL, 0, fmt, sqrt(2));
-//char buf[sz + 1]; // note +1 for terminating null byte
-//snprintf(buf, sizeof buf, fmt, sqrt(2));
 
-int minutes_to_time(uint16_t minutes, char* out, size_t buffer_size) {
-    //TODO:sprintf_s???
-    return snprintf(out, buffer_size, R"("%02d:%02d")", minutes / 60, minutes % 60);
-}
-
-enum CORRECTION : uint8_t {
-    NO_WARN = 0,
-    LM_61,
-    LM_59,
-    NOT_SYNC
-};
-
-
-enum MODE: uint8_t {
-    RESERVED = 0,
-    SYMMETRIC_ACTIVE,
-    SYMMETRIC_PASSIVE,
-    CLIENT,
-    SERVER,
-    BROADCAST,
-    RESERVED0,
-    RESERVED1
-};
-
-uint8_t reverseBits(uint8_t num, uint8_t bitCount) {
-    uint8_t reversed = 0;
-    for (uint8_t i = 0; i < bitCount; ++i) {
-        if ((num & (1 << i))) {
-            reversed |= 1 << ((bitCount - 1) - i);
-        }
-    }
-    return reversed;
-}
-struct sntp_msg {
+struct sntp_msg_t {
     uint8_t correction : 2;
     uint8_t version : 3;
     uint8_t mode : 3;
@@ -60,6 +21,36 @@ struct sntp_msg {
     uint64_t receive_timestamp;
     uint64_t transmit_timestamp;
 } __attribute__((packed));
+
+static WiFiUDP UDP;
+
+//TODO: работа с BCD классом
+//TODO: работа с EEPROM классом
+//TODO:const char fmt[] = "sqrt(2) = %f";
+//int sz = snprintf(NULL, 0, fmt, sqrt(2));
+//char buf[sz + 1]; // note +1 for terminating null byte
+//snprintf(buf, sizeof buf, fmt, sqrt(2));
+
+int minutes_to_time(uint16_t minutes, char* out, size_t buffer_size) {
+    //TODO:sprintf_s???
+    return snprintf(out, buffer_size, R"("%02d:%02d")", minutes / 60, minutes % 60);
+}
+
+
+
+
+
+
+uint8_t reverseBits(uint8_t num, uint8_t bitCount) {
+    uint8_t reversed = 0;
+    for (uint8_t i = 0; i < bitCount; ++i) {
+        if ((num & (1 << i))) {
+            reversed |= 1 << ((bitCount - 1) - i);
+        }
+    }
+    return reversed;
+}
+
 
 uint64_t ntohll(uint64_t value) {
     return ((uint64_t) ntohl(value & 0xFFFFFFFF) << 32) | ntohl(value >> 32);
@@ -82,8 +73,8 @@ String timestamp_to_string(uint64_t timestamp) {
 //uint32_t ntohl(uint32_t value) {
 //    return ((uint64_t) ntohl(value & 0xFFFF) << 16) | ntohl(value >> 16);
 //}
-// Функция для печати sntp_msg с расшифровкой значений
-void print_sntp_msg(const sntp_msg& msg) {
+// Функция для печати sntp_msg_t с расшифровкой значений
+void print_sntp_msg(const sntp_msg_t& msg) {
     Serial.println("SNTP Message:");
     Serial.print("#  Correction: "); Serial.println(msg.correction);
     Serial.print("#  Version: "); Serial.println(msg.version);
@@ -138,12 +129,12 @@ void print_sntp_msg(const sntp_msg& msg) {
 inline uint32_t _merge(uint8_t* buf) {
     return (buf[0] << 8) | buf[1];
 }
-static WiFiUDP UDP;
+
 bool isudp = false;
 //TODO: коррекция SNTP, согласование с сервером
 //TODO: калбеки для асинзронной задержки и поллинг нтуреннего цикла
-std::time_t ntp::time(){
-    sntp_msg message{.correction = NOT_SYNC,
+std::time_t ntp::time(std::time_t *arg) {
+    sntp_msg_t message{.correction = NOT_SYNC,
                      .version = 4,
                      .mode = CLIENT};
 
@@ -233,9 +224,9 @@ memcpy(&message, buf, 48);
         const uint64_t seconds_since_1900 = 2208988800ULL; // Время в секундах с 1 января 1900 года
         return message.receive_timestamp - seconds_since_1900;
       //  print_sntp_msg(message);
-        //print_sntp_msg(*reinterpret_cast<sntp_msg*>(buf));
+        //print_sntp_msg(*reinterpret_cast<sntp_msg_t*>(buf));
        //Serial.print("NTP: ");Serial.println(unix);
-       //Serial.print("NTP: ");Serial.println(ntohll(reinterpret_cast<sntp_msg*>(buf)->transmit_timestamp) - 2208988800UL);
+       //Serial.print("NTP: ");Serial.println(ntohll(reinterpret_cast<sntp_msg_t*>(buf)->transmit_timestamp) - 2208988800UL);
        // message.transmit_timestamp = message.transmit_timestamp & 0x00000000FFFFFFFF;
       //  message.transmit_timestamp = (message.transmit_timestamp & 0xFFFFFFFF00000000) >> 32;
       // Serial.print("NTP: ");Serial.println(ntohll(message.transmit_timestamp) - 2208988800UL);

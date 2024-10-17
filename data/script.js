@@ -14,10 +14,10 @@ $(document).ready(function() {
     function add_row_to_table(start_time, end_time, smooth_transition, duration) {
         const smooth_text = smooth_transition ? 'Да' : 'Нет';
         const duration_text = smooth_transition ? duration : '—';
-        function minutes_to_strtime(minutes) {
-            const hours = Math.floor(minutes / 60);
-            const mins = minutes % 60;
-            return `${hours < 10 ? '0' : ''}${hours}:${mins < 10 ? '0' : ''}${mins}`;
+        function minutes_to_strtime(minutes_raw) {
+            const hours = Math.floor(minutes_raw / 60);
+            const minutes = minutes_raw % 60;
+            return `${hours < 10 ? '0' : ''}${hours}:${minutes < 10 ? '0' : ''}${minutes}`;
         }
         const row = `<tr>
                     <td>${minutes_to_strtime(start_time)}</td>

@@ -191,12 +191,6 @@ void setup() {
         file.close();
     });
     server.begin();
-    //PT_INIT(&nm_context);
-    //PT_INIT(&web_server_context);
-    //PT_INIT(&led_context);
-    //PT_INIT(&entries_context);
-
-
 }
 
 ////функция которая кооректирует время ds1307 по времени из ntp раз в сутки
@@ -452,7 +446,7 @@ PT_THREAD(led_control){
 }
 
 PT_THREAD(entries_processing){
-    const std::time_t time_tmp = ntp::time() + TIMEZONE * 60 * 60;
+    const std::time_t time_tmp = ntp::time(nullptr) + TIMEZONE * 60 * 60;
     //const std::time_t time_tmp = ds1307::time(nullptr) + TIMEZONE * 60 * 60;
     const auto curr_min = std::gmtime(&time_tmp)->tm_hour * 60 + std::gmtime(&time_tmp)->tm_min;
     //  Serial.println(std::ctime(&time_tmp));
@@ -465,7 +459,7 @@ PT_THREAD(entries_processing){
                     for(size_t i = 0; i < cache_ctr; ++i){
                         if(cache_entries[i].start == 0 && cache_entries[i].end == 0)
                             continue;
-                        //TODO: оптимизировать/переписать/помечать задачу как запущенную или отпавлять в конец списка
+                        //TODO: оптимизировать/переписать/помечать задачу как запущенную или отправлять в конец списка
 
                         if(curr_min  >= (cache_entries[i].end - cache_entries[i].transition_time)){
                             set_led(false, cache_entries[i].transition_time * 60 * 1000);
