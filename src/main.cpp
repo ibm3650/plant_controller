@@ -7,6 +7,45 @@
 #include "24c32.h"
 #include "ds1307.h"
 #include "ntp.h"
+#include "debug.h"
+
+template<typename T, typename... args_pack>
+void print_variadic(const T& first, args_pack... args) {
+    Serial.print(first);
+    Serial.print(' ');
+    if constexpr (sizeof...(args) > 0) {
+        print_variadic(args...);
+    }
+    else {
+        Serial.println();
+    }
+}
+
+template<typename... args_pack>
+void log_message(LogLevel level, const char* file, int line, args_pack... message) {
+    if (level < CURRENT_LOG_LEVEL) return;
+
+    String level_str;
+    switch (level) {
+        case LogLevel::DEBUG: level_str = "DEBUG"; break;
+        case LogLevel::INFO: level_str = "INFO"; break;
+        case LogLevel::WARNING: level_str = "WARNING"; break;
+        case LogLevel::ERROR: level_str = "ERROR"; break;
+    }
+
+    unsigned long current_time = millis();  // Время в миллисекундах с момента старта
+    Serial.print(level_str);
+    Serial.print(" [");
+    Serial.print(file);
+    Serial.print(":");
+    Serial.print(line);
+    Serial.print("] ");
+    Serial.print("Time: ");
+    Serial.print(current_time / 1000);  // Время в секундах
+    Serial.print("s: ");
+    print_variadic(message...);
+}
+
 
 
 #define PT_THREAD_DECL(name)    static pt name##_context{0, #name, false};\
@@ -30,7 +69,7 @@
 namespace {
     constexpr auto SSID = "MikroTik-B971FF";
     constexpr auto PASSWORD = "pussydestroyer228";
-    constexpr uint8_t MAX_WIFI_TRIES = 5;
+    constexpr uint8_t MAX_WIFI_TRIES = 15;
     constexpr uint8_t CACHE_SIZE = 16;
     constexpr uint16_t WEB_PORT = 80;
 
@@ -61,8 +100,12 @@ namespace {
     //pt entries_context{};
 } // namespace
 
-static int32_t str_to_int(const char* str);
-static uint16_t strtime_to_minutes(const char* time_str);
+[[maybe_unused]] static int32_t str_to_int(const char* str);
+
+[[maybe_unused]] static uint16_t strtime_to_minutes(const char* time_str);
+static const char* get_mime_type(const String& filename);
+static entry_t parse_task_json(const String& json);
+String create_json(const entry_t* entries, size_t count);
 //TODO: учесть, что переход может произойти раньше чем счетчик достигнет максимума
 void set_led(bool state, size_t transition = 0);
 void wifi_disconnect_cb(const WiFiEventStationModeDisconnected& event);
@@ -72,6 +115,7 @@ void wifi_connected_cb(const WiFiEventStationModeConnected& event);
 //TODO: защита от повторной вставки
 //TODO: проверки при добавлении
 //TODO: пв sprintf правильные литералы аргументов или вообще std::format
+//TODO:Оптимистичный ответ
 void web_add_record_cb();
 //TODO:получать все записи
 //TODO:оптимальное формирование json
@@ -96,19 +140,24 @@ PT_THREAD_DECL(entries_processing);
 //TODO: Кеширование записей EEPROM
 //TODO: удаление записей EEPROM
 //TODO: полная реализация time по стандарту rfc
-entry_t get_node(uint16_t address=0x0000){
-    return cache_entries[0];
-    entry_t tmp{};
-    read_random(address, reinterpret_cast<uint8_t *>(&tmp), sizeof(entry_t));
-    return tmp;
+entry_t get_node(uint16_t address){
+    if(cache_ctr == 0){
+        LOG_INFO("Cache is empty");
+        return {};
+    }
+    LOG_DEBUG("Getting node", cache_entries[address].start, cache_entries[address].end, cache_entries[address].transition_time);
+    return cache_entries[address];
 }
 
-void insert_node(const entry_t& entry, uint16_t address=0x0000){
-    Serial.println("Inserting");
-    Serial.println(entry.start);
-    cache_entries[cache_ctr] = entry;cache_ctr++;return;
-    if(get_node().deleted)return;
-    write_page(address, reinterpret_cast<const uint8_t *>(&entry), sizeof(entry));
+
+void insert_node(const entry_t& entry){
+    LOG_DEBUG("Inserting node", entry.start, entry.end, entry.transition_time);
+    if(cache_ctr >= CACHE_SIZE){
+        LOG_INFO("Cache is full");
+        return;
+    }
+    cache_entries[cache_ctr] = entry;
+    cache_ctr++;
 }
 
 void delete_node(uint16_t address=0x0000){
@@ -130,15 +179,24 @@ void setup() {
     server.on("/add_record", web_add_record_cb);
     server.on("/get_records",  web_get_record_cb);
     server.on("/", web_index_cb);
+    server.onNotFound([]() {
+        LOG_DEBUG("Request", server.uri());
+        File file = SPIFFS.open(server.uri(), "r");
+        if (!file) {
+            server.send(404, "text/plain", "File not found");
+            LOG_INFO("File not found", server.uri());
+            return;
+        }
+        server.streamFile(file, get_mime_type(server.uri()));
+        file.close();
+    });
     server.begin();
     //PT_INIT(&nm_context);
     //PT_INIT(&web_server_context);
     //PT_INIT(&led_context);
     //PT_INIT(&entries_context);
 
-    cache_entries[cache_ctr++] = get_node();
-    cache_entries[cache_ctr].start -= cache_entries[0].transition_time;
-    cache_entries[cache_ctr].end -= cache_entries[0].transition_time;
+
 }
 
 ////функция которая кооректирует время ds1307 по времени из ntp раз в сутки
@@ -160,7 +218,7 @@ void loop() {
     PT_SCHEDULE(entries_processing);
 }
 
-int32_t str_to_int(const char* str) {
+[[maybe_unused]] int32_t str_to_int(const char* str) {
     int8_t sign = 1;
     if (*str == '-') {
         str++;
@@ -178,7 +236,7 @@ int32_t str_to_int(const char* str) {
     return accumulator * sign;
 }
 
-uint16_t strtime_to_minutes(const char* time_str) {
+[[maybe_unused]] uint16_t strtime_to_minutes(const char* time_str) {
     if (std::strlen(time_str) != 5 || time_str[2] != ':') { // NOLINT(*-magic-numbers)
         return 0xFFFF; // NOLINT(*-magic-numbers)
     }
@@ -187,6 +245,23 @@ uint16_t strtime_to_minutes(const char* time_str) {
     const uint16_t minutes = (time_str[3] - '0') * 10 + (time_str[4] - '0'); // NOLINT(*-magic-numbers)
 
     return hours * 60 + minutes; // NOLINT(*-magic-numbers)
+}
+
+const char* get_mime_type(const String& filename){
+    if(server.hasArg("download")) return "application/octet-stream";
+    if(filename.endsWith(".htm")) return "text/html";
+    if(filename.endsWith(".html")) return "text/html";
+    if(filename.endsWith(".css")) return "text/css";
+    if(filename.endsWith(".js")) return "application/javascript";
+    if(filename.endsWith(".png")) return "image/png";
+    if(filename.endsWith(".gif")) return "image/gif";
+    if(filename.endsWith(".jpg")) return "image/jpeg";
+    if(filename.endsWith(".ico")) return "image/x-icon";
+    if(filename.endsWith(".xml")) return "text/xml";
+    if(filename.endsWith(".pdf")) return "application/x-pdf";
+    if(filename.endsWith(".zip")) return "application/x-zip";
+    if(filename.endsWith(".gz")) return "application/x-gzip";
+    return "text/plain";
 }
 
 void set_led(bool state, size_t transition) {
@@ -204,44 +279,65 @@ void wifi_connected_cb(const WiFiEventStationModeConnected& /*event*/){
     tries_ctr = 0;
 }
 
+entry_t parse_task_json(const String& json) {
+    // Сохраним индексы, чтобы избежать повторных вычислений
+    int start_index = json.indexOf("start_time") + 12;
+    int end_index = json.indexOf(',', start_index);
+    const long start_time = json.substring(start_index, end_index).toInt();
+
+    start_index = json.indexOf("end_time") + 10;
+    end_index = json.indexOf(',', start_index);
+    const long end_time = json.substring(start_index, end_index).toInt();
+
+    start_index = json.indexOf("smooth_transition") + 19;
+    end_index = json.indexOf(',', start_index);
+    const bool smooth_transition = json.substring(start_index, end_index) == "true";
+
+    start_index = json.indexOf("duration") + 10;
+    end_index = json.indexOf('}', start_index);
+    const long duration = json.substring(start_index, end_index).toInt();
+
+    return {static_cast<uint16_t>(start_time),
+            static_cast<uint16_t>(end_time),
+            static_cast<uint16_t>(duration)};
+}
+
+String create_json(const entry_t* entries, size_t count) {
+    String json = "[";
+
+    for (size_t i = 0; i < count; ++i) {
+        if (i > 0) {
+            json += ",";  // Добавляем запятую перед каждой следующей записью
+        }
+
+        json += "{";
+        json += "\"start_time\":" + String(entries[i].start) + ",";
+        json += "\"end_time\":" + String(entries[i].end) + ",";
+        json += "\"smooth_transition\":" + (entries[i].transition_time ? String("true") : String("false")) + ",";  // Преобразуем в JSON
+        json += "\"duration\":" + String(entries[i].transition_time);  // Преобразуем в JSON
+        json += "}";
+    }
+
+    json += "]";
+    return json;  // Возвращаем сформированную строку JSON
+}
+
 void web_add_record_cb() {
-
-    const auto prepare = [](const String &str) -> String {
-        const size_t delim_pos = str.indexOf(':');
-        return str.substring(delim_pos == -1 ? 0 : delim_pos + 1);
-    };
     const auto payload = server.arg("plain");
-//TODO:Оптимистичный ответ
+    LOG_DEBUG("Request", server.uri(), payload);
     server.send(200, "application/json", payload);
-
-    char values[4][8];
-    size_t pos = 0;
-    size_t pos_old = 1;
-    size_t ctr = 0;
-    while ((pos = payload.indexOf(',', pos + 1)) != -1) {
-        const auto tmp = payload.substring(pos_old, pos);
-        strcpy(values[ctr++], prepare(tmp).c_str());
-        pos_old = pos;
-    }
-    if (payload.length() - pos_old) {
-        const auto tmp = payload.substring(pos_old, payload.length() - 1);
-        strcpy(values[ctr++], prepare(tmp).c_str());
-    }
-    insert_node({strtime_to_minutes(values[0]),
-                 strtime_to_minutes(values[1]),
-                 static_cast<uint16_t>(str_to_int(values[3])),
-                 nullptr,
-                 false});
-
-
-//        Serial.println(strtime_to_minutes(values[0]));
-//        Serial.println(strtime_to_minutes(values[1]));
-//        Serial.println(str_to_int(values[3]));
+    insert_node(parse_task_json(payload));
 }
 
 void web_get_record_cb() {
+    const String json_out{create_json(cache_entries, cache_ctr)};
+    LOG_DEBUG("Request", server.uri(), json_out);
+    server.send(200, "application/json", json_out.c_str());
+    return;
+
+
     //auto const   entry = cache_entries[0];
-    const auto entry = get_node();
+    const auto entry = get_node(0);
     const char *fmt = R"([{
                 "startTime": "%02d:%02d",
                 "endTime": "%02d:%02d",
@@ -273,6 +369,7 @@ void web_get_record_cb() {
 }
 
 void web_index_cb() {
+
     File file = SPIFFS.open("/index.html", "r");
     if (!file) {
         return;

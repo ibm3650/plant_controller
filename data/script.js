@@ -14,9 +14,14 @@ $(document).ready(function() {
     function add_row_to_table(start_time, end_time, smooth_transition, duration) {
         const smooth_text = smooth_transition ? 'Да' : 'Нет';
         const duration_text = smooth_transition ? duration : '—';
+        function minutes_to_strtime(minutes) {
+            const hours = Math.floor(minutes / 60);
+            const mins = minutes % 60;
+            return `${hours < 10 ? '0' : ''}${hours}:${mins < 10 ? '0' : ''}${mins}`;
+        }
         const row = `<tr>
-                    <td>${start_time}</td>
-                    <td>${end_time}</td>
+                    <td>${minutes_to_strtime(start_time)}</td>
+                    <td>${minutes_to_strtime(end_time)}</td>
                     <td>${smooth_text}</td>
                     <td>${duration_text}</td>
                     <td><button class="delete-btn">Удалить</button></td>

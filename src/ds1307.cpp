@@ -2,8 +2,9 @@
 // Created by kandu on 11.10.2024.
 //
 #include "ds1307.h"
-#include <Wire.h>
 #include <Arduino.h>
+#include <Wire.h>
+
 //TODO: полный функцийонал ды1307
 //TODO: соответствие С и с++ api interface
 namespace{
