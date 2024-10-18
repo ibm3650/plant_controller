@@ -8,6 +8,7 @@
 #include "ds1307.h"
 #include "ntp.h"
 #include "debug.h"
+#include "wl_definitions.h"
 
 template<typename T, typename... args_pack>
 void print_variadic(const T& first, args_pack... args) {
@@ -92,12 +93,6 @@ namespace {
     entry_t cache_entries[CACHE_SIZE]{};
     uint8_t cache_ctr = 0;
     ESP8266WebServer server(WEB_PORT);
-
-    //Protothreads contexts
-    //pt nm_context{};
-    //pt web_server_context{};
-    //pt led_context{};
-    //pt entries_context{};
 } // namespace
 
 [[maybe_unused]] static int32_t str_to_int(const char* str);
@@ -166,7 +161,8 @@ void delete_node(uint16_t address=0x0000){
     tmp.deleted = true;
     write_page(address, reinterpret_cast<const uint8_t *>(&tmp), sizeof(entry_t));
 }
-
+ntp::ntp_client client("ntp3.time.in.ua");
+//ntp::ntp_client client("pool.ntp.org");
 //TODO: Кеширование всех записей EEPROM
 //TODO: Сортировка кешированных записей EEPROM
 void setup() {
@@ -191,16 +187,11 @@ void setup() {
         file.close();
     });
     server.begin();
+    client.set_update_interval(60);
+    client.set_timezone_offset(3);
+    client.set_timeout(1000);
 }
 
-////функция которая кооректирует время ds1307 по времени из ntp раз в сутки
-//void f(){
-//    static time_t last_time = 0;
-//    if(ds1307::time(nullptr) - last_time >= 24 * 60 * 60){
-//        ds1307::set_time(ntp::time());
-//        last_time = ds1307::time(nullptr);
-//    }
-//}
 
 void loop() {
     PT_SCHEDULE(led_control);
@@ -208,8 +199,9 @@ void loop() {
     if (WiFi.status() != WL_CONNECTED) {
         return;
     }
-    PT_SCHEDULE(web_server);
     PT_SCHEDULE(entries_processing);
+    client.sync_poll();
+    server.handleClient();
 }
 
 [[maybe_unused]] int32_t str_to_int(const char* str) {
@@ -328,42 +320,9 @@ void web_get_record_cb() {
     LOG_DEBUG("Request", server.uri(), json_out);
     server.send(200, "application/json", json_out.c_str());
     return;
-
-
-    //auto const   entry = cache_entries[0];
-    const auto entry = get_node(0);
-    const char *fmt = R"([{
-                "startTime": "%02d:%02d",
-                "endTime": "%02d:%02d",
-                "smoothTransition": %s,
-                "duration": %d
-        }])";
-
-    const size_t buffer_size = snprintf(nullptr, 0, fmt,
-                                        entry.start / 60,
-                                        entry.start % 60,
-                                        entry.end / 60,
-                                        entry.end % 60,
-                                        entry.transition_time == 0 ? "false" : "true",
-                                        entry.transition_time);
-
-    String buffer(static_cast<const char *>(nullptr)); //TODO:чтобы не выделял память в куче зря. SSO?
-    buffer.reserve(buffer_size + 1);//TODO:проверит есть ли выделение памяти
-    snprintf(buffer.begin(), //TODO: потому что в ардуино эта функция возвращает указатель на буфер неконстантным
-             buffer_size + 1,
-             fmt,
-             entry.start / 60,
-             entry.start % 60,
-             entry.end / 60,
-             entry.end % 60,
-             entry.transition_time == 0 ? "false" : "true",
-             entry.transition_time);
-    Serial.println(buffer.c_str());
-    server.send(200, "application/json", buffer.c_str());
 }
 
 void web_index_cb() {
-
     File file = SPIFFS.open("/index.html", "r");
     if (!file) {
         return;
@@ -426,41 +385,29 @@ PT_THREAD(led_control){
         i = 0;
     }
 
-    //Serial.printf("LED VALUE: %d#%d\n", i,__LINE__);
     PT_BEGIN(pt);
                 for (; i < 0xFF; ++i) {
-                    // Serial.printf("LED VALUE: %d#%d\n", i,__LINE__);
                     analogWrite(D5, current_state ? 0xFF - i : i);
                     PT_YIELD_UNTIL(pt, !delay);
                     delay(led_transition_delay);
                     Serial.printf("LED VALUE: %d#%d\n", i, current_state);
                 }
-//                if(led_state == current_state) {
-//                    current_state = !current_state;
-//                    PT_YIELD(pt);
-//                }
-                //  Serial.printf("LED VALUE: %d#%d\n", i,__LINE__);
                 current_state = led_state;
-                //PT_EXIT(pt);
     PT_END(pt);
 }
 
 PT_THREAD(entries_processing){
-    const std::time_t time_tmp = ntp::time(nullptr) + TIMEZONE * 60 * 60;
-    //const std::time_t time_tmp = ds1307::time(nullptr) + TIMEZONE * 60 * 60;
+    if(!client.time()){
+        return 3;
+    }
+    const std::time_t time_tmp = client.time().value();
     const auto curr_min = std::gmtime(&time_tmp)->tm_hour * 60 + std::gmtime(&time_tmp)->tm_min;
-    //  Serial.println(std::ctime(&time_tmp));
-    // Serial.println(ds1307::time(nullptr));
-    //Serial.println(curr_min);
-    // Serial.println(time_tmp);
     PT_BEGIN(pt);
-
                 while(true){
                     for(size_t i = 0; i < cache_ctr; ++i){
                         if(cache_entries[i].start == 0 && cache_entries[i].end == 0)
                             continue;
-                        //TODO: оптимизировать/переписать/помечать задачу как запущенную или отправлять в конец списка
-
+                        // TODO(kandu): оптимизировать/переписать/помечать задачу как запущенную или отправлять в конец списка
                         if(curr_min  >= (cache_entries[i].end - cache_entries[i].transition_time)){
                             set_led(false, cache_entries[i].transition_time * 60 * 1000);
                             Serial.println("LED OFF");

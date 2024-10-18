@@ -2,71 +2,44 @@
 // Created by kandu on 14.10.2024.
 //
 #include "ntp.h"
-#include "async_wait.h"
 #include <WiFiUdp.h>
 #include <Arduino.h>
-
-
-
-static WiFiUDP UDP;
-
-//TODO: работа с BCD классом
-//TODO: работа с EEPROM классом
-//TODO:const char fmt[] = "sqrt(2) = %f";
-//int sz = snprintf(NULL, 0, fmt, sqrt(2));
-//char buf[sz + 1]; // note +1 for terminating null byte
-//snprintf(buf, sizeof buf, fmt, sqrt(2));
-
-int minutes_to_time(uint16_t minutes, char* out, size_t buffer_size) {
-    //TODO:sprintf_s???
-    return snprintf(out, buffer_size, R"("%02d:%02d")", minutes / 60, minutes % 60);
-}
+#include <cstring>
+#include <optional>
 
 
 
 
-
-
-uint8_t reverseBits(uint8_t num, uint8_t bitCount) {
+//TODO:Оптимизация инвертирования порядка бит
+uint8_t invert_bits(uint8_t value, size_t bits){
     uint8_t reversed = 0;
-    for (uint8_t i = 0; i < bitCount; ++i) {
-        if ((num & (1 << i))) {
-            reversed |= 1 << ((bitCount - 1) - i);
+    for (size_t i = 0; i < bits; ++i) {
+        if ((value & (1 << i))) {
+            reversed |= 1 << ((bits - 1) - i);
         }
     }
     return reversed;
 }
 
-
-uint64_t ntohll(uint64_t value) {
-    return ((uint64_t) ntohl(value & 0xFFFFFFFF) << 32) | ntohl(value >> 32);
+std::time_t ntp_to_timestamp(uint32_t timestamp){
+    timestamp = ntohl(timestamp);
+    return timestamp - ntp::SINCE_1900;
 }
-String timestamp_to_string(uint64_t timestamp) {
-  //  timestamp = ntohll(timestamp);
-    // SNTP использует временные метки в формате "с 1900 года"
-   // timestamp = timestamp & 0xFFFFFFFF;
-   timestamp = ntohl(timestamp & 0xFFFFFFFF);
-   // timestamp = (timestamp & 0xFFFFFFFF00000000)>>32;
-    const uint64_t seconds_since_1900 = 2208988800ULL; // Время в секундах с 1 января 1900 года
-    uint64_t seconds_since_1970 = timestamp - seconds_since_1900;
 
-    time_t t = seconds_since_1970; // Конвертация в стандартный формат времени
-    char buffer[20]; // Буфер для форматированной строки
-    strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", localtime(&t)); // Форматирование
+String timestamp_to_string(uint32_t timestamp) {
+    timestamp = ntohl(timestamp);
+    const std::time_t converted_time = timestamp - 2208988800UL;
+    char buffer[20];
+    strftime(buffer, sizeof(buffer), "%Y-%m-%d %H:%M:%S", localtime(&converted_time)); // Форматирование
     return {buffer};
 }
 
-//uint32_t ntohl(uint32_t value) {
-//    return ((uint64_t) ntohl(value & 0xFFFF) << 16) | ntohl(value >> 16);
-//}
-// Функция для печати sntp_msg_t с расшифровкой значений
-void print_sntp_msg(const sntp_msg_t& msg) {
+void print_sntp_msg(const ntp::sntp_msg_t& msg) {
     Serial.println("SNTP Message:");
-    Serial.print("#  Correction: "); Serial.println(msg.correction);
-    Serial.print("#  Version: "); Serial.println(msg.version);
-    Serial.print("#  Mode: ");
-
-    switch (msg.mode) {
+    Serial.print("  Correction: "); Serial.println(invert_bits(msg.correction, 2));
+    Serial.print("  Version: "); Serial.println(invert_bits(msg.version, 3));
+    Serial.print("  Mode: ");
+    switch (invert_bits(msg.mode, 3)) {
         case 0: Serial.println("Reserved"); break;
         case 1: Serial.println("Symmetric Active"); break;
         case 2: Serial.println("Symmetric Passive"); break;
@@ -78,148 +51,28 @@ void print_sntp_msg(const sntp_msg_t& msg) {
         default: Serial.println("Unknown"); break;
     }
     Serial.print("  Stratum: "); Serial.println(msg.stratum);
-    Serial.print("  Poll: "); Serial.print(msg.poll >= 0 ? 1UL << msg.poll : (double)1.0 / (1UL << -msg.poll));Serial.println(" sec");
-    Serial.print("#  Precision: "); Serial.println(msg.precision >= 0 ? 1UL << msg.precision : (double)1.0 / (1UL << -msg.precision));
-    Serial.print("  Root Delay: "); Serial.printf("[%d] ,  %.3f sec\n",
-                                                  msg.root_delay,
-//                                                  (ntohl(msg.root_delay) & 0xFFFF0000) >> 16,
-//                                                  ntohl(msg.root_delay) & 0x0000FFFF
-                                                  ntohs(msg.root_delay & 0x0000FFFF) * 1000.0 +
-                                                  ( ntohs((msg.root_delay & 0xFFFF0000) >> 16))  / 65536.0
-                                                  );
-    Serial.print("  Root Dispersion: "); Serial.printf("[%d] ,  %.3f\n sec",
-                                                       msg.root_dispersion,
-                                                       ntohs(msg.root_dispersion & 0x0000FFFF) * 1000.0 +
-                                                       (ntohs((msg.root_dispersion & 0xFFFF0000) >> 16))  / 65536.0
-    );
+
+    double const poll = msg.poll >= 0 ? 1UL << msg.poll : 1.0 / (1UL << -msg.poll);
+    Serial.print("  Poll: "); Serial.print(poll);
+
+    double const precision = msg.precision >= 0 ? 1UL << msg.precision : 1.0 / (1UL << -msg.precision);
+    Serial.print("  Precision: "); Serial.println(precision);
+
+    Serial.print("  Root Delay: ");Serial.println(ntohs(msg.root_delay.seconds) * 1000.0 +
+                                                 ntohs(msg.root_delay.fraction) / 65536.0);
+
+    Serial.print("  Root Dispersion: ");Serial.println(ntohs(msg.root_dispersion.seconds) * 1000.0 +
+                                                      ntohs(msg.root_dispersion.fraction) / 65536.0);
+
+    Serial.print(" #Reference ID: ");
     if(msg.stratum >= 2){
-
-        Serial.print("  Reference ID: "); Serial.println(IPAddress(msg.reference_id).toString());
-//        Serial.print("  Reference ID: 0x"); Serial.println(msg.reference_id, HEX);
+        Serial.println(IPAddress(msg.reference_id).toString());
     }
-    else if(msg.stratum == 0){
-        //4 ascii symbols. kiss code}
-    }
-    else if(msg.stratum == 1) {//4 ascii symbols. list from IANA         }
-    }
-    Serial.print("  Reference Timestamp: ");
-    Serial.println(timestamp_to_string(msg.reference_timestamp));
-    Serial.print("  Originate Timestamp: "); Serial.println(timestamp_to_string(msg.originate_timestamp));
-    Serial.print("  Receive Timestamp: "); Serial.println(timestamp_to_string(msg.receive_timestamp));
-    Serial.print("  Transmit Timestamp: "); Serial.println(timestamp_to_string(msg.transmit_timestamp));
-    //Serial.print("  Transmit Timestamp: "); Serial.println(msg.transmit_timestamp-2208988800ULL);
-}
 
-
-
-inline uint32_t _merge(uint8_t* buf) {
-    return (buf[0] << 8) | buf[1];
-}
-
-bool isudp = false;
-//TODO: коррекция SNTP, согласование с сервером
-//TODO: калбеки для асинзронной задержки и поллинг нтуреннего цикла
-std::time_t ntp::time(std::time_t *arg) {
-    sntp_msg_t message{.correction = NOT_SYNC,
-                     .version = 4,
-                     .mode = CLIENT};
-
-//    uint8_t ntpResponse[] = {
-//            0x34, 0x02, 0x03, 0xE8, 0x00, 0x00, 0x10, 0x10,
-//            0x00, 0x00, 0x08, 0x8A, 0x81, 0xFA, 0x23, 0xDE,
-//            0xEA, 0xB8, 0xE7, 0x89, 0x90, 0xF3, 0x7F, 0x44,
-//            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-//            0xEA, 0xB8, 0xEE, 0x7B, 0xE7, 0xEA, 0x35, 0x21,
-//            0xEA, 0xB8, 0xEE, 0x7B, 0xE7, 0xEB, 0xBD, 0x8A
-//    };
-//
-//    memcpy(&message, ntpResponse, 48);
-//    print_sntp_msg(message);
-//    delay(1000);
-   // msg.transmit_timestamp = htonll(current_time_in_ntp_format()); //TODO;учет времени отправки важен и обязателен
-    //msg.transmit_timestamp = htonll(current_time_in_ntp_format()); //TODO;коррекция time
-//    Serial.println(UDP.beginPacket("pool.ntp.org", 123));
-//    Serial.println(UDP.write(reinterpret_cast<uint8_t*>(&message), sizeof(message)));
-//    Serial.println(UDP.endPacket());
-    int packetSize = 0;
-    if(!isudp) {
-        UDP.begin(8888);
-        isudp=true;
-    }
-   // UDP.setTimeout(2500);
-    IPAddress ip;
-    ip.fromString("129.250.35.250");
-    uint8_t buf[48] = {0b11100011};
-   // Serial.printf("Sending SNTP request to pool.ntp.org on port 123\n");
-    if (UDP.beginPacket(ip, 123) == 1) {
-
-   // if (UDP.beginPacket("pool.ntp.org", 123) == 1) {
-      //  Serial.printf("Packet started successfully.\n");
-
-       // if ((packetSize = UDP.write(buf, 48)) > 0) {
-        if ((packetSize = UDP.write(reinterpret_cast<uint8_t*>(&message), sizeof(message))) > 0) {
-         //   Serial.printf("Packet written successfully. Size: %d bytes\n",packetSize);
-            if (!UDP.endPacket()) {
-            //    Serial.println("Failed to send UDP packet");
-                return -1;
-            }
-         //   Serial.println("Packet sent.\n");
-        } else {
-        //    Serial.println("Failed to write to packet.\n");
-            return -1;
-        }
-    } else {
-      //  Serial.println("Failed to start packet.\n");
-        return -1;
-    }
-    async_wait delayt(1000);
-
-
-    unsigned long startTime = millis();
-    while (delayt && (packetSize = UDP.parsePacket()) != 48) {
-//        if (millis() - startTime > 2000) { // Устанавливаем тайм-аут 2 секунды
-//            Serial.println("Timeout waiting for response.\n");
-//            return;
-//        }
-    }
-  //  delay(1000);
-    //packetSize = UDP.parsePacket();
-   // Serial.println(packetSize);
-    if (packetSize) {
-        int len = UDP.read(buf, sizeof(message));
-        uint32_t unix = ((_merge(buf + 40) << 16) | _merge(buf + 42)) - 2208988800UL;
-        //int len = UDP.read(reinterpret_cast<uint8_t*>(&message), sizeof(message));
-        //Serial.println(packetSize);
-      //  Serial.printf("Received packet from %s:%d\n", UDP.remoteIP().toString().c_str(), UDP.remotePort());
-      //  Serial.printf("Message len : %d\n", len);
-
-//       for (int i = 47; i >= 0 ; --i) {
-//            reinterpret_cast<uint8_t*>(&message)[47-i] = buf[i];
-//        }
-//        for (int i = 0; i < 48; ++i) {
-//            Serial.print(buf[i], HEX);
-//            Serial.print(" ");
-//        }
-
-
-memcpy(&message, buf, 48);
-      //  print_sntp_msg(message);
-      // delay(1000);
-        message.receive_timestamp = ntohl(message.receive_timestamp & 0xFFFFFFFF);
-        // timestamp = (timestamp & 0xFFFFFFFF00000000)>>32;
-        const uint64_t seconds_since_1900 = 2208988800ULL; // Время в секундах с 1 января 1900 года
-        return message.receive_timestamp - seconds_since_1900;
-      //  print_sntp_msg(message);
-        //print_sntp_msg(*reinterpret_cast<sntp_msg_t*>(buf));
-       //Serial.print("NTP: ");Serial.println(unix);
-       //Serial.print("NTP: ");Serial.println(ntohll(reinterpret_cast<sntp_msg_t*>(buf)->transmit_timestamp) - 2208988800UL);
-       // message.transmit_timestamp = message.transmit_timestamp & 0x00000000FFFFFFFF;
-      //  message.transmit_timestamp = (message.transmit_timestamp & 0xFFFFFFFF00000000) >> 32;
-      // Serial.print("NTP: ");Serial.println(ntohll(message.transmit_timestamp) - 2208988800UL);
-      // Serial.print("NTP: ");Serial.println(message.transmit_timestamp - 2208988800UL);
-    }
-    //WiFiUDP::stopAll();
-    return -1;
+    Serial.print("  Reference Timestamp: ");Serial.println(timestamp_to_string(msg.reference_timestamp.seconds));
+    Serial.print("  Originate Timestamp: "); Serial.println(timestamp_to_string(msg.originate_timestamp.seconds));
+    Serial.print("  Receive Timestamp: "); Serial.println(timestamp_to_string(msg.receive_timestamp.seconds));
+    Serial.print("  Transmit Timestamp: "); Serial.println(timestamp_to_string(msg.transmit_timestamp.seconds));
 }
 
 ntp::ntp_client::ntp_client(std::string_view address, uint16_t port) noexcept {
@@ -236,15 +89,25 @@ void ntp::ntp_client::set_server(std::string_view address, uint16_t port) noexce
     }
     is_initialized_ = true;
 }
-
-bool ntp::ntp_client::sync() noexcept {
+//FIXME: Проверка валидности пакета
+// TODO(kandu): Сделать асинхронным
+[[nodiscard]] bool ntp::ntp_client::sync() noexcept {
+    while(socket_.parsePacket() != 0) {
+        socket_.flush();
+}
+    //socket_.stop();
     if (!socket_.beginPacket(address_.c_str(), port_)) {
         Serial.println("#NTP Failed to start packet");
         return false;
     }
+    memset(&message_, 0, sizeof(message_));
     message_.mode = static_cast<uint8_t>(MODE::CLIENT);
     message_.version = 4;
     message_.correction = static_cast<uint8_t>(CORRECTION::NOT_SYNC);
+   // uint8_t b = 0b11100011;
+   // memcpy(&message_,&b,1);
+    //Serial.print("SNTP Message:");Serial.println(*reinterpret_cast<uint8_t*>(&message_), BIN);
+   // Serial.print("SNTP Message1:");Serial.println(val, BIN);
     size_t packet_size = socket_.write(reinterpret_cast<uint8_t*>(&message_), sizeof(message_));
     if (packet_size == 0) {
         Serial.println("#NTP Failed to write to packet");
@@ -255,13 +118,15 @@ bool ntp::ntp_client::sync() noexcept {
         return false;
     }
     delay_timer_(connection_timeout_);
-    while (delay_timer_ && (packet_size = UDP.parsePacket()) < sizeof(message_));
+    while (delay_timer_ && (packet_size = socket_.parsePacket()) < sizeof(message_));
     if (packet_size < sizeof(message_)) {
         Serial.println("#NTP Timeout waiting for response or packet size is less than expected");
         return false;
     }
     const int len = socket_.read(reinterpret_cast<uint8_t*>(&message_), sizeof(message_));
     last_update_ = millis();
+
+    //print_sntp_msg(message_);
     return true;
 }
 
@@ -273,7 +138,7 @@ ntp::UPDATE_STATUS ntp::ntp_client::sync_poll() noexcept {
 }
 
 bool ntp::ntp_client::is_synchronized() const noexcept {
-    return (last_update_ + update_interval_ * 1000 >= millis()) && last_update_ != 0;
+    return (((last_update_ + (update_interval_ * 1000)) >= millis()) && last_update_ != 0);
 }
 
 void ntp::ntp_client::set_timezone_offset(uint8_t offset) noexcept {
@@ -287,3 +152,14 @@ void ntp::ntp_client::set_timeout(size_t timeout) noexcept {
 void ntp::ntp_client::set_update_interval(size_t interval) noexcept {
     update_interval_ = interval;
 }
+//FIXME: Учитывать внутреннее состояние для возврата корректного значения
+std::optional<std::time_t> ntp::ntp_client::time() const noexcept {
+    if(last_update_ == 0){
+        return std::nullopt;
+    }
+    return ntp_to_timestamp(message_.transmit_timestamp.seconds) +
+    time_zone_offset_ * 3600 +
+    (millis() - last_update_) / 1000;
+}
+
+
