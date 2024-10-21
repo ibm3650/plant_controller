@@ -78,12 +78,14 @@ namespace {
     //TODO: оптимизировать побитно
     //TODO: mutex for i2c Wire
     struct entry_t {
-        uint16_t start ;//: 11;
-        uint16_t end; //: 11;
-        uint16_t transition_time ;//: 9;
+        uint16_t start: 11 ;//: 11;
+        uint16_t end: 11; //: 11;
+        uint8_t transition_time ;//: 9;
         //service vars
-        entry_t* next;
-        uint8_t deleted;// : 1;
+        uint16_t next_node:12;
+        uint8_t deleted:1;
+        //entry_t* next;
+        //uint8_t deleted;// : 1;
         //uint8_t deleted : 1;
     } __attribute__((packed));
 
@@ -100,7 +102,8 @@ namespace {
 [[maybe_unused]] static uint16_t strtime_to_minutes(const char* time_str);
 static const char* get_mime_type(const String& filename);
 static entry_t parse_task_json(const String& json);
-String create_json(const entry_t* entries, size_t count);
+//String create_json(const entry_t* entries, size_t count);
+String create_json();
 //TODO: учесть, что переход может произойти раньше чем счетчик достигнет максимума
 void set_led(bool state, size_t transition = 0);
 void wifi_disconnect_cb(const WiFiEventStationModeDisconnected& event);
@@ -135,31 +138,141 @@ PT_THREAD_DECL(entries_processing);
 //TODO: Кеширование записей EEPROM
 //TODO: удаление записей EEPROM
 //TODO: полная реализация time по стандарту rfc
-entry_t get_node(uint16_t address){
-    if(cache_ctr == 0){
-        LOG_INFO("Cache is empty");
+entry_t get_node(uint16_t address) {
+    uint8_t buffer[eeprom::PAGE_SIZE];
+    size_t page = address / eeprom::PAGE_SIZE;
+    size_t offset = address % eeprom::PAGE_SIZE;
+
+    // Ограничение на выход за пределы EEPROM
+    if (address + sizeof(entry_t) > eeprom::STORAGE_SIZE) {
+        LOG_ERROR("Address out of bounds");
         return {};
     }
-    LOG_DEBUG("Getting node", cache_entries[address].start, cache_entries[address].end, cache_entries[address].transition_time);
-    return cache_entries[address];
-}
 
+    eeprom::read_random(page * eeprom::PAGE_SIZE, buffer, eeprom::PAGE_SIZE);
 
-void insert_node(const entry_t& entry){
-    LOG_DEBUG("Inserting node", entry.start, entry.end, entry.transition_time);
-    if(cache_ctr >= CACHE_SIZE){
-        LOG_INFO("Cache is full");
-        return;
+    // Перебираем данные внутри страницы
+    for (size_t j = offset / sizeof(entry_t); j < eeprom::PAGE_SIZE / sizeof(entry_t); ++j) {
+        auto* current_element = reinterpret_cast<entry_t*>(buffer + j * sizeof(entry_t));
+
+        // Проверяем, что запись не удалена
+        if (!current_element->deleted) {
+            LOG_DEBUG("Node found", current_element->start, current_element->end, current_element->transition_time);
+            return *current_element;
+        }
     }
-    cache_entries[cache_ctr] = entry;
-    cache_ctr++;
+
+    LOG_INFO("EEPROM is empty or all nodes are deleted");
+    return {};
 }
 
-void delete_node(uint16_t address=0x0000){
-    entry_t tmp{};
-    read_random(address, reinterpret_cast<uint8_t *>(&tmp), sizeof(entry_t));
-    tmp.deleted = true;
-    write_page(address, reinterpret_cast<const uint8_t *>(&tmp), sizeof(entry_t));
+//TODO: Оптимизация числа записи и чтения
+//TODO: Проверка предлов страницы
+void insert_node(const entry_t& entry) {
+    uint8_t buffer[eeprom::PAGE_SIZE];
+
+    for (size_t i = 0; i < eeprom::STORAGE_SIZE / eeprom::PAGE_SIZE; ++i) {
+        eeprom::read_random(i * eeprom::PAGE_SIZE, buffer, eeprom::PAGE_SIZE);
+
+        // Перебираем элементы внутри страницы
+        for (size_t j = 0; j < eeprom::PAGE_SIZE / sizeof(entry_t); ++j) {
+            const size_t current_address = i * eeprom::PAGE_SIZE + j * sizeof(entry_t);
+            entry_t* current_element = reinterpret_cast<entry_t*>(buffer + j * sizeof(entry_t));
+
+            // Если запись удалена, вставляем на её место и сохраняем цепочку
+            if (current_element->deleted) {
+                LOG_DEBUG("Inserting node into deleted slot", entry.start, entry.end, entry.transition_time);
+
+                // Создаем копию нового элемента
+                entry_t new_entry = entry;
+
+                // Сохраняем цепочку — если у удаленного элемента есть указатель на следующий элемент,
+                // мы должны перенести этот указатель в новую запись
+                new_entry.next_node = current_element->next_node;
+
+                // Записываем новый элемент на место удаленного
+                eeprom::write_page(current_address, reinterpret_cast<const uint8_t*>(&new_entry), sizeof(entry_t));
+                return;
+            }
+
+            // Если нашли последнюю запись в цепочке, добавляем новую
+            if (current_element->next_node == 0x0000) {
+                LOG_DEBUG("Inserting node into eeprom", entry.start, entry.end, entry.transition_time);
+
+                const size_t next_address = current_address + sizeof(entry_t);
+
+                // Указываем адрес следующего элемента в текущем элементе
+                current_element->next_node = next_address;
+
+                // Обновляем текущий элемент с новым указателем next_node
+                eeprom::write_page(current_address, reinterpret_cast<const uint8_t*>(current_element), sizeof(entry_t));
+
+                // Записываем новую запись на следующее место
+                eeprom::write_page(next_address, reinterpret_cast<const uint8_t*>(&entry), sizeof(entry_t));
+                return;
+            }
+        }
+    }
+
+    LOG_INFO("EEPROM is full, unable to insert node");
+}
+
+
+std::vector<entry_t> get_all_nodes() {
+    std::vector<entry_t> nodes;  // Для хранения всех считанных элементов
+    uint8_t buffer[eeprom::PAGE_SIZE];
+
+    // Начинаем с первого элемента
+    size_t current_address = 0;
+
+    while (current_address < eeprom::STORAGE_SIZE) {
+        LOG_DEBUG("Reading EEPROM at address", current_address);
+        // Определяем страницу и смещение в ней
+        size_t page = current_address / eeprom::PAGE_SIZE;
+        size_t offset_in_page = current_address % eeprom::PAGE_SIZE;
+
+        // Читаем текущую страницу EEPROM
+        eeprom::read_random(page * eeprom::PAGE_SIZE, buffer, eeprom::PAGE_SIZE);
+
+        // Читаем элемент по текущему адресу
+        entry_t* current_element = reinterpret_cast<entry_t*>(buffer + offset_in_page);
+
+        // Проверяем, что элемент не удален
+        if (!current_element->deleted) {
+            // Добавляем элемент в список
+            nodes.push_back(*current_element);
+        }
+
+        // Если next_node равен 0x0000, значит, это последний элемент
+        if (current_element->next_node == 0x0000) {
+            break;
+        }
+
+        // Переходим к следующему элементу по указателю next_node
+        current_address = current_element->next_node;
+    }
+
+    return nodes;  // Возвращаем все найденные элементы
+}
+void delete_node(uint16_t address) {
+    uint8_t buffer[eeprom::PAGE_SIZE];
+    size_t page = address / eeprom::PAGE_SIZE;
+    size_t offset = address % eeprom::PAGE_SIZE;
+
+    // Чтение страницы
+    eeprom::read_random(page * eeprom::PAGE_SIZE, buffer, eeprom::PAGE_SIZE);
+
+    entry_t* current_element = reinterpret_cast<entry_t*>(buffer + offset);
+
+    // Если элемент не удален, помечаем его как удаленный
+    if (!current_element->deleted) {
+        current_element->deleted = 1;
+        LOG_DEBUG("Node deleted", current_element->start, current_element->end);
+        eeprom::write_page(page * eeprom::PAGE_SIZE + offset, reinterpret_cast<uint8_t*>(current_element), sizeof(entry_t));
+    }
+    else {
+        LOG_INFO("Node already deleted");
+    }
 }
 ntp::ntp_client client("ntp3.time.in.ua");
 //ntp::ntp_client client("pool.ntp.org");
@@ -190,10 +303,55 @@ void setup() {
     client.set_update_interval(60);
     client.set_timezone_offset(3);
     client.set_timeout(1000);
+    //uint8_t empty_data[eeprom::PAGE_SIZE];
+//    std::fill_n(empty_data, eeprom::PAGE_SIZE, 0x00);  // Заполняем буфер значением 0xFF (или 0x00, если нужно "обнулить")
+//
+//    // Проходим по всей памяти EEPROM, записывая пустые данные
+//    for (size_t i = 0; i < eeprom::STORAGE_SIZE / eeprom::PAGE_SIZE; ++i) {
+//        eeprom::write_page(i * eeprom::PAGE_SIZE, empty_data, eeprom::PAGE_SIZE);
+//    }
 }
 
 
 void loop() {
+//    byte error, address;
+//    int nDevices;
+//
+//    Serial.println("Scanning...");
+//
+//    nDevices = 0;
+//    for(address = 1; address < 127; address++ )
+//    {
+//        // The i2c_scanner uses the return value of
+//        // the Write.endTransmisstion to see if
+//        // a device did acknowledge to the address.
+//        Wire.beginTransmission(address);
+//        error = Wire.endTransmission();
+//
+//        if (error == 0)
+//        {
+//            Serial.print("I2C device found at address 0x");
+//            if (address<16)
+//                Serial.print("0");
+//            Serial.print(address,HEX);
+//            Serial.println("  !");
+//
+//            nDevices++;
+//        }
+//        else if (error==4)
+//        {
+//            Serial.print("Unknown error at address 0x");
+//            if (address<16)
+//                Serial.print("0");
+//            Serial.println(address,HEX);
+//        }
+//    }
+//    if (nDevices == 0)
+//        Serial.println("No I2C devices found\n");
+//    else
+//        Serial.println("done\n");
+//
+//    delay(5000);           // wait 5 seconds for next scan
     PT_SCHEDULE(led_control);
     PT_SCHEDULE(network_manager);
     if (WiFi.status() != WL_CONNECTED) {
@@ -285,24 +443,64 @@ entry_t parse_task_json(const String& json) {
 
     return {static_cast<uint16_t>(start_time),
             static_cast<uint16_t>(end_time),
-            static_cast<uint16_t>(duration)};
+            static_cast<uint8_t>(duration)};
 }
 
-String create_json(const entry_t* entries, size_t count) {
+String create_json() {
     String json = "[";
 
-    for (size_t i = 0; i < count; ++i) {
-        if (i > 0) {
+    std::vector<entry_t> all_nodes = get_all_nodes();
+    bool flag = false;
+    for (const auto& tmp : all_nodes) {
+        if (flag) {
             json += ",";  // Добавляем запятую перед каждой следующей записью
         }
-
         json += "{";
-        json += "\"start_time\":" + String(entries[i].start) + ",";
-        json += "\"end_time\":" + String(entries[i].end) + ",";
-        json += "\"smooth_transition\":" + (entries[i].transition_time ? String("true") : String("false")) + ",";  // Преобразуем в JSON
-        json += "\"duration\":" + String(entries[i].transition_time);  // Преобразуем в JSON
+        json += "\"start_time\":" + String(tmp.start) + ",";
+        json += "\"end_time\":" + String(tmp.end) + ",";
+        json += "\"smooth_transition\":" + (tmp.transition_time ? String("true") : String("false")) + ",";  // Преобразуем в JSON
+        json += "\"duration\":" + String(tmp.transition_time);  // Преобразуем в JSON
         json += "}";
+
+        flag = true;
     }
+
+//    uint16_t address = 0x0000;
+//    while(true){
+//        entry_t const tmp = get_node(address);
+//
+//        if(tmp.start == 0 && tmp.end == 0) {
+//            if(tmp.next_node == 0x0000)
+//                break;
+//            address = tmp.next_node;
+//            continue;
+//        }
+//        if (address > 0) {
+//            json += ",";  // Добавляем запятую перед каждой следующей записью
+//        }
+//
+//        json += "{";
+//        json += "\"start_time\":" + String(tmp.start) + ",";
+//        json += "\"end_time\":" + String(tmp.end) + ",";
+//        json += "\"smooth_transition\":" + (tmp.transition_time ? String("true") : String("false")) + ",";  // Преобразуем в JSON
+//        json += "\"duration\":" + String(tmp.transition_time);  // Преобразуем в JSON
+//        json += "}";
+//        if(tmp.next_node == 0x0000)
+//            break;
+//        address = tmp.next_node;
+//    }
+//    for (size_t i = 0; i < count; ++i) {
+//        if (i > 0) {
+//            json += ",";  // Добавляем запятую перед каждой следующей записью
+//        }
+//
+//        json += "{";
+//        json += "\"start_time\":" + String(entries[i].start) + ",";
+//        json += "\"end_time\":" + String(entries[i].end) + ",";
+//        json += "\"smooth_transition\":" + (entries[i].transition_time ? String("true") : String("false")) + ",";  // Преобразуем в JSON
+//        json += "\"duration\":" + String(entries[i].transition_time);  // Преобразуем в JSON
+//        json += "}";
+//    }
 
     json += "]";
     return json;  // Возвращаем сформированную строку JSON
@@ -316,10 +514,9 @@ void web_add_record_cb() {
 }
 
 void web_get_record_cb() {
-    const String json_out{create_json(cache_entries, cache_ctr)};
+    const String json_out{create_json()};
     LOG_DEBUG("Request", server.uri(), json_out);
     server.send(200, "application/json", json_out.c_str());
-    return;
 }
 
 void web_index_cb() {
@@ -400,6 +597,7 @@ PT_THREAD(entries_processing){
     if(!client.time()){
         return 3;
     }
+    Serial.println(ds1307::time(0));
     const std::time_t time_tmp = client.time().value();
     const auto curr_min = std::gmtime(&time_tmp)->tm_hour * 60 + std::gmtime(&time_tmp)->tm_min;
     PT_BEGIN(pt);
