@@ -2,6 +2,7 @@
 #include <ESP8266WebServer.h>
 #include <Wire.h>
 #include <ctime>
+#include <vector>
 #include "pt.h"
 #include "async_wait.h"
 #include "24c32.h"
@@ -67,6 +68,38 @@ void log_message(LogLevel level, const char* file, int line, args_pack... messag
 #undef PT_SCHEDULE_RESUME
 #define PT_SCHEDULE_RESUME(name) name##_context.is_stoped=false;
 #endif
+
+typedef struct {
+    bool locked;
+} pt_mutex_t;
+
+/**
+ * Инициализация мьютекса.
+ * Устанавливает мьютекс в "разблокированное" состояние.
+ */
+#define PT_MUTEX_DECL(name) static pt_mutex_t name##_mutex{false};
+//#define PT_MUTEX_INIT(mutex) ((mutex)->locked = false)
+
+/**
+ * Блокировка мьютекса.
+ * Если мьютекс уже захвачен, протопоток блокируется, пока мьютекс не освободится.
+ */
+#define PT_MUTEX_LOCK(name)        \
+  do {                                  \
+    PT_WAIT_UNTIL(pt, !(name##_mutex.locked)); \
+    name##_mutex.locked = true;             \
+  } while(0)
+
+/**
+ * Разблокировка мьютекса.
+ * Освобождает мьютекс, позволяя другим протопотокам захватить его.
+ */
+#define PT_MUTEX_UNLOCK(name)      \
+  do {                                  \
+    name##_mutex.locked = false;            \
+  } while(0)
+
+
 namespace {
     constexpr auto SSID = "MikroTik-B971FF";
     constexpr auto PASSWORD = "pussydestroyer228";
@@ -122,6 +155,7 @@ void web_add_record_cb();
 //TODO:использовать кеш
 //TODO:Оптимизировать эту функцию
 void web_get_record_cb();
+void web_delete_record_cb();
 void web_index_cb();
 PT_THREAD_DECL(network_manager);
 //TODO: Вариант не работает с режимом точки доступа
@@ -138,6 +172,10 @@ PT_THREAD_DECL(entries_processing);
 //TODO: Кеширование записей EEPROM
 //TODO: удаление записей EEPROM
 //TODO: полная реализация time по стандарту rfc
+PT_THREAD_DECL(clock_manager);
+PT_MUTEX_DECL(twi_mutex);
+//FIXMW: TWI не потокобезопасен
+
 entry_t get_node(uint16_t address) {
     uint8_t buffer[eeprom::PAGE_SIZE];
     size_t page = address / eeprom::PAGE_SIZE;
@@ -218,29 +256,29 @@ void insert_node(const entry_t& entry) {
 }
 
 
-std::vector<entry_t> get_all_nodes() {
-    std::vector<entry_t> nodes;  // Для хранения всех считанных элементов
+std::vector<std::pair<uint16_t, entry_t>> get_all_nodes() {
+    std::vector<std::pair<uint16_t, entry_t>> nodes;  // Для хранения всех считанных элементов
     uint8_t buffer[eeprom::PAGE_SIZE];
 
     // Начинаем с первого элемента
-    size_t current_address = 0;
+    uint16_t current_address = 0x0000;
 
     while (current_address < eeprom::STORAGE_SIZE) {
         LOG_DEBUG("Reading EEPROM at address", current_address);
         // Определяем страницу и смещение в ней
-        size_t page = current_address / eeprom::PAGE_SIZE;
-        size_t offset_in_page = current_address % eeprom::PAGE_SIZE;
+        size_t const page = current_address / eeprom::PAGE_SIZE;
+        size_t const offset_in_page = current_address % eeprom::PAGE_SIZE;
 
         // Читаем текущую страницу EEPROM
         eeprom::read_random(page * eeprom::PAGE_SIZE, buffer, eeprom::PAGE_SIZE);
 
         // Читаем элемент по текущему адресу
-        entry_t* current_element = reinterpret_cast<entry_t*>(buffer + offset_in_page);
+        auto* current_element = reinterpret_cast<entry_t*>(buffer + offset_in_page);
 
         // Проверяем, что элемент не удален
         if (!current_element->deleted) {
             // Добавляем элемент в список
-            nodes.push_back(*current_element);
+            nodes.emplace_back(current_address, *current_element);
         }
 
         // Если next_node равен 0x0000, значит, это последний элемент
@@ -267,7 +305,7 @@ void delete_node(uint16_t address) {
     // Если элемент не удален, помечаем его как удаленный
     if (!current_element->deleted) {
         current_element->deleted = 1;
-        LOG_DEBUG("Node deleted", current_element->start, current_element->end);
+        LOG_DEBUG("Node deleted", address, current_element->start, current_element->end);
         eeprom::write_page(page * eeprom::PAGE_SIZE + offset, reinterpret_cast<uint8_t*>(current_element), sizeof(entry_t));
     }
     else {
@@ -287,6 +325,7 @@ void setup() {
     WiFi.onStationModeDisconnected(wifi_disconnect_cb);
     server.on("/add_record", web_add_record_cb);
     server.on("/get_records",  web_get_record_cb);
+    server.on("/delete_record",  web_delete_record_cb);
     server.on("/", web_index_cb);
     server.onNotFound([]() {
         LOG_DEBUG("Request", server.uri());
@@ -357,7 +396,10 @@ void loop() {
     if (WiFi.status() != WL_CONNECTED) {
         return;
     }
-    PT_SCHEDULE(entries_processing);
+    //PT_SCHEDULE(web_server);
+  //  PT_SCHEDULE(entries_processing);
+  //  PT_SCHEDULE(clock_manager);
+
     client.sync_poll();
     server.handleClient();
 }
@@ -447,22 +489,24 @@ entry_t parse_task_json(const String& json) {
 }
 
 String create_json() {
+    LOG_DEBUG("Creating JSON");
     String json = "[";
 
-    std::vector<entry_t> all_nodes = get_all_nodes();
-    bool flag = false;
-    for (const auto& tmp : all_nodes) {
-        if (flag) {
+    const auto all_nodes = get_all_nodes();
+    bool is_first = false;
+    for (const auto& [address, node] : all_nodes) {
+        if (is_first) {
             json += ",";  // Добавляем запятую перед каждой следующей записью
         }
         json += "{";
-        json += "\"start_time\":" + String(tmp.start) + ",";
-        json += "\"end_time\":" + String(tmp.end) + ",";
-        json += "\"smooth_transition\":" + (tmp.transition_time ? String("true") : String("false")) + ",";  // Преобразуем в JSON
-        json += "\"duration\":" + String(tmp.transition_time);  // Преобразуем в JSON
+        json += "\"start_time\":" + String(node.start) + ",";
+        json += "\"end_time\":" + String(node.end) + ",";
+        json += "\"smooth_transition\":" + (node.transition_time ? String("true") : String("false")) + ",";  // Преобразуем в JSON
+        json += "\"duration\":" + String(node.transition_time) + ",";
+        json += "\"address\":" + String(address);  // Преобразуем в JSON
         json += "}";
 
-        flag = true;
+        is_first = true;
     }
 
 //    uint16_t address = 0x0000;
@@ -513,8 +557,17 @@ void web_add_record_cb() {
     insert_node(parse_task_json(payload));
 }
 
+
+void web_delete_record_cb() {
+    const auto payload = server.arg("plain");
+    LOG_DEBUG("Request", server.uri(), payload, payload.substring(payload.indexOf(':') + 1, payload.length() - 1));
+    server.send(200, "application/json", payload);
+    delete_node(str_to_int(payload.substring(payload.indexOf(':') + 1, payload.length() - 1).c_str()));
+}
+
 void web_get_record_cb() {
     const String json_out{create_json()};
+
     LOG_DEBUG("Request", server.uri(), json_out);
     server.send(200, "application/json", json_out.c_str());
 }
@@ -524,6 +577,7 @@ void web_index_cb() {
     if (!file) {
         return;
     }
+    LOG_DEBUG("Request", server.uri());
     server.streamFile(file, "text/html");
     file.close();
 }
@@ -565,7 +619,9 @@ PT_THREAD(network_manager) {
 PT_THREAD(web_server) {
     PT_BEGIN(pt);
                 while (true) {
+                  //  PT_MUTEX_LOCK(twi_mutex);
                     server.handleClient();
+                   // PT_MUTEX_UNLOCK(twi_mutex);
                     PT_YIELD(pt);
                 }
     PT_END(pt);
@@ -594,14 +650,19 @@ PT_THREAD(led_control){
 }
 
 PT_THREAD(entries_processing){
-    if(!client.time()){
-        return 3;
-    }
-    Serial.println(ds1307::time(0));
-    const std::time_t time_tmp = client.time().value();
-    const auto curr_min = std::gmtime(&time_tmp)->tm_hour * 60 + std::gmtime(&time_tmp)->tm_min;
+    std::time_t time_tmp;
+    uint16_t curr_min;
+
     PT_BEGIN(pt);
+
                 while(true){
+                   // PT_MUTEX_LOCK(twi_mutex);
+                    time_tmp = ds1307::time(0);
+                   // PT_MUTEX_UNLOCK(twi_mutex);
+                    if(time_tmp == -1)
+                        PT_YIELD(pt);
+                    //Serial.println(time_tmp);
+                    curr_min = std::gmtime(&time_tmp)->tm_hour * 60 + std::gmtime(&time_tmp)->tm_min;
                     for(size_t i = 0; i < cache_ctr; ++i){
                         if(cache_entries[i].start == 0 && cache_entries[i].end == 0)
                             continue;
@@ -616,6 +677,32 @@ PT_THREAD(entries_processing){
                             Serial.println("LED ON");
                         }
                     }
+                    PT_YIELD(pt);
+                }
+    PT_END(pt);
+}
+
+PT_THREAD(clock_manager){
+    static async_wait delay(0);
+    PT_BEGIN(pt);
+                while(true){
+                    //PT_MUTEX_LOCK(twi_mutex);
+                    if(!client.time()){
+                        LOG_ERROR("NTP Failed ");
+                        PT_YIELD(pt);
+                    }
+                    if(!ds1307::is_enabled()){
+                        LOG_ERROR("DS1307 is not enabled");
+                        ds1307::set_oscilator(true);
+
+                    }
+                   // PT_MUTEX_UNLOCK(twi_mutex);
+                    PT_YIELD_UNTIL(pt, !delay);
+                    delay(12 * 60 * 60 * 1000);
+                    //PT_MUTEX_LOCK(twi_mutex);
+                    ds1307::set_time(client.time().value());
+                   // PT_MUTEX_UNLOCK(twi_mutex);
+                    LOG_INFO("Time updated");
                     PT_YIELD(pt);
                 }
     PT_END(pt);

@@ -103,6 +103,42 @@ void set_format(FORMAT fmt){
     //Wire.write((hours & ~static_cast<uint8_t>(fmt)) | static_cast<uint8_t>(fmt));
     Wire.endTransmission();
 }
+
+bool ds1307::is_enabled() {
+    uint8_t control = 0;
+    read_memspace(0x00, &control, sizeof(control));
+    return !(control & (1 << 7));
+}
+
+void ds1307::set_time(std::time_t time){
+    uint8_t buffer[7] = {};
+    std::tm* tm = std::localtime(&time);
+    buffer[0] = dec_to_bcd(tm->tm_sec);
+    buffer[1] = dec_to_bcd(tm->tm_min);
+    buffer[2] = dec_to_bcd(tm->tm_hour);
+    buffer[3] = dec_to_bcd(tm->tm_wday);
+    buffer[4] = dec_to_bcd(tm->tm_mday);
+    buffer[5] = dec_to_bcd(tm->tm_mon + 1);
+    buffer[6] = dec_to_bcd(tm->tm_year - 100);
+    Wire.beginTransmission(ds1307::RTC_ADDR);
+    Wire.write(0x00);
+    Wire.write(buffer, sizeof(buffer));
+    Wire.endTransmission();
+}
+
+void ds1307::set_oscilator(bool enable){
+    uint8_t control = 0;
+    read_memspace(0x00, &control, sizeof(control));
+    Wire.beginTransmission(ds1307::RTC_ADDR);
+    Wire.write(0x00);
+    if(enable)
+        control &= ~(1 << 7);
+    else
+        control |= (1 << 7);
+    Wire.write(control);
+    Wire.endTransmission();
+}
+
 //TODO: учитывать 24\12 формат
 //TODO: установка в 12часовом ормате треьует конвертации
 std::time_t ds1307::time( std::time_t* arg ){
@@ -111,7 +147,8 @@ std::time_t ds1307::time( std::time_t* arg ){
 
     if(::read_memspace(0x00, buffer, datetime_registers_len) != datetime_registers_len)
         return static_cast<std::time_t>(-1);
-
+    if(buffer[0] & (1 << 7))
+        return static_cast<std::time_t>(-1);
     //DEBUG(::bcd_to_dec(buffer, 1), "Seconds: ");
     //DEBUG(::bcd_to_dec(buffer + 1, 1), "Minutes: ");
 

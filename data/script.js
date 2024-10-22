@@ -11,7 +11,7 @@ $(document).ready(function() {
         const [hours, minutes] = time.split(':').map(Number);
         return hours * 60 + minutes;
     }
-    function add_row_to_table(start_time, end_time, smooth_transition, duration) {
+    function add_row_to_table(start_time, end_time, smooth_transition, duration, address) {
         const smooth_text = smooth_transition ? 'Да' : 'Нет';
         const duration_text = smooth_transition ? duration : '—';
         function minutes_to_strtime(minutes_raw) {
@@ -19,7 +19,7 @@ $(document).ready(function() {
             const minutes = minutes_raw % 60;
             return `${hours < 10 ? '0' : ''}${hours}:${minutes < 10 ? '0' : ''}${minutes}`;
         }
-        const row = `<tr>
+        const row = `<tr id="${address}">
                     <td>${minutes_to_strtime(start_time)}</td>
                     <td>${minutes_to_strtime(end_time)}</td>
                     <td>${smooth_text}</td>
@@ -35,7 +35,7 @@ $(document).ready(function() {
             method: 'GET',
             success: function(records) {
                 $.each(records, function(index, record) {
-                    add_row_to_table(record.start_time, record.end_time, record.smooth_transition, record.duration);
+                    add_row_to_table(record.start_time, record.end_time, record.smooth_transition, record.duration, record.address);
                 });
             }
         });
@@ -77,9 +77,17 @@ $(document).ready(function() {
             }
         });
     });
-    //TODO: Удаление записи через Jquery
+    //FIXME: После удаления записи, необходимо удалить её из таблицы
     $('#record_table').on('click', '.delete-btn', function() {
-        $(this).closest('tr').remove();
+        $.ajax({
+            url: '/delete_record',
+            method: 'POST',
+            contentType: 'application/json',
+            data: JSON.stringify({address: parseInt($(this).closest('tr').attr('id'))}),
+            success: function (record) {
+                $(this).closest('tr').remove();
+            }
+        });
     });
 
     load_records();

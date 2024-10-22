@@ -153,6 +153,7 @@ void ntp::ntp_client::set_update_interval(size_t interval) noexcept {
     update_interval_ = interval;
 }
 //FIXME: Учитывать внутреннее состояние для возврата корректного значения
+//FIXME: Учитывать устаревание данных
 std::optional<std::time_t> ntp::ntp_client::time() const noexcept {
     if(last_update_ == 0){
         return std::nullopt;
