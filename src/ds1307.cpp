@@ -4,6 +4,12 @@
 #include "ds1307.h"
 #include <Arduino.h>
 #include <Wire.h>
+#define DEBUG(var, name)    {\
+Serial.printf("DEBUG[%lu] : %s#%s#%d : %s", millis(), __FILE__, __FUNCTION__, __LINE__, name ? name : "unnamed");\
+Serial.println(var);\
+}
+
+#define DEBUG_N(var)  DEBUG(var, nullptr)
 
 //TODO: полный функцийонал ды1307
 //TODO: соответствие С и с++ api interface
@@ -22,12 +28,16 @@ namespace{
     }
     //TODO: учет буффера i2c
     size_t read_memspace(uint8_t address, uint8_t* buffer, size_t length){
+//        while(Wire.available()) {
+//           Wire.flush();
+//        }
         Wire.beginTransmission(ds1307::RTC_ADDR);
         Wire.write(address);
         if (Wire.endTransmission() != 0) {
             return 0;
         }
         const size_t bytes_read = Wire.requestFrom(ds1307::RTC_ADDR, static_cast<uint8_t>(length));
+        //DEBUG(bytes_read, "Bytes read: ");
         if (bytes_read == 0) {
             return 0;
         }
@@ -39,12 +49,6 @@ namespace{
 } // local namespace
 
 
-#define DEBUG(var, name)    {\
-Serial.printf("DEBUG[%lu] : %s#%s#%d : %s", millis(), __FILE__, __FUNCTION__, __LINE__, name ? name : "unnamed");\
-Serial.println(var);\
-}
-
-#define DEBUG_N(var)  DEBUG(var, nullptr)
 
 
 
@@ -124,6 +128,7 @@ void ds1307::set_time(std::time_t time){
     Wire.write(0x00);
     Wire.write(buffer, sizeof(buffer));
     Wire.endTransmission();
+
 }
 
 void ds1307::set_oscilator(bool enable){
@@ -144,9 +149,13 @@ void ds1307::set_oscilator(bool enable){
 std::time_t ds1307::time( std::time_t* arg ){
     constexpr uint8_t datetime_registers_len = 7;
     uint8_t buffer[datetime_registers_len] = {};
-
-    if(::read_memspace(0x00, buffer, datetime_registers_len) != datetime_registers_len)
+    //Serial.println("Get time");
+    //delay(10);
+    if(::read_memspace(0x00, buffer, datetime_registers_len) != datetime_registers_len) {
+        //Serial.println("Error reading from RTC");
+        //return static_cast<std::time_t>(1);
         return static_cast<std::time_t>(-1);
+    }
     if(buffer[0] & (1 << 7))
         return static_cast<std::time_t>(-1);
     //DEBUG(::bcd_to_dec(buffer, 1), "Seconds: ");
@@ -176,7 +185,7 @@ std::time_t ds1307::time( std::time_t* arg ){
     years_ue += ::bcd_to_dec(buffer, 1);
     years_ue += ::bcd_to_dec(buffer+1, 1) * 60;
     years_ue += hours * 60 * 60;
-    return years_ue - TIMEZONE * 3600;
+    return years_ue ;
 }
 
 
