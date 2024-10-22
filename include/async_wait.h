@@ -3,7 +3,9 @@
 //
 
 #pragma once
+
 #include <Arduino.h>
+
 /**
  * @class async_wait
  * @brief Класс для асинхронного ожидания на основе не блокирующего таймера.

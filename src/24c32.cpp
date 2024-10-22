@@ -4,10 +4,11 @@
 #include "24c32.h"
 #include <Wire.h>
 #include <algorithm>
+
 constexpr auto eeprom_block_size = std::min(TWI_BUFFER_LENGTH - sizeof(uint16_t),
                                             static_cast<size_t>(eeprom::PAGE_SIZE));
 
-void eeprom::write_page(uint16_t address, const uint8_t* data, size_t length) {
+void eeprom::write_page(uint16_t address, const uint8_t *data, size_t length) {
     while (length > 0) {
         const size_t bytes_in_page = PAGE_SIZE - address % PAGE_SIZE;
         const size_t bytes_count = std::min({length, eeprom_block_size, bytes_in_page});
@@ -26,8 +27,7 @@ void eeprom::write_page(uint16_t address, const uint8_t* data, size_t length) {
 }
 
 
-
-void eeprom::read_random(uint16_t address, uint8_t* buffer, size_t length) {
+void eeprom::read_random(uint16_t address, uint8_t *buffer, size_t length) {
     while (length > 0) {
         const size_t bytes_in_page = PAGE_SIZE - address % PAGE_SIZE;
         const int bytes_count = std::min({length, eeprom_block_size, bytes_in_page});

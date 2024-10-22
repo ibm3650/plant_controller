@@ -29,7 +29,7 @@ namespace ntp {
         NOT_SYNC
     };
 
-    enum class MODE: uint8_t {
+    enum class MODE : uint8_t {
         RESERVED = 0,
         SYMMETRIC_ACTIVE,
         SYMMETRIC_PASSIVE,
@@ -58,9 +58,9 @@ namespace ntp {
     } __attribute__((packed));
 
     struct sntp_msg_t {
-        uint8_t correction : 2;
-        uint8_t version : 3;
-        uint8_t mode : 3;
+        uint8_t correction: 2;
+        uint8_t version: 3;
+        uint8_t mode: 3;
         uint8_t stratum;
         int8_t poll;
         int8_t precision;
@@ -77,19 +77,19 @@ namespace ntp {
     public:
         ntp_client() = default;
 
-        explicit ntp_client(std::string_view address, uint16_t port=NTP_PORT) noexcept;
+        explicit ntp_client(std::string_view address, uint16_t port = NTP_PORT) noexcept;
 
-        ntp_client(const ntp_client&) = default;
+        ntp_client(const ntp_client &) = default;
 
-        ntp_client& operator=(const ntp_client&) = default;
+        ntp_client &operator=(const ntp_client &) = default;
 
-        ntp_client(ntp_client&&) = default;
+        ntp_client(ntp_client &&) = default;
 
-        ntp_client& operator=(ntp_client&&) = default;
+        ntp_client &operator=(ntp_client &&) = default;
 
         ~ntp_client() = default;
 
-        void set_server(std::string_view address, uint16_t port=NTP_PORT) noexcept;
+        void set_server(std::string_view address, uint16_t port = NTP_PORT) noexcept;
 
         [[nodiscard]] std::optional<std::time_t> time() const noexcept;
 
@@ -107,6 +107,7 @@ namespace ntp {
         void set_timeout(size_t timeout) noexcept;
 
         void set_update_interval(size_t interval) noexcept;
+
     private:
         //FIXME: Учитывать потокобезопасность. Обновлять и получать можно одновременно,использовать таймер задержки. избегать гонок
         sntp_msg_t message_{};
