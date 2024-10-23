@@ -1,329 +1,205 @@
-/*
- * Copyright (c) 2004-2006, Swedish Institute of Computer Science.
- * All rights reserved.
- *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in the
- *    documentation and/or other materials provided with the distribution.
- * 3. Neither the name of the Institute nor the names of its contributors
- *    may be used to endorse or promote products derived from this software
- *    without specific prior written permission.
- *
- * THIS SOFTWARE IS PROVIDED BY THE INSTITUTE AND CONTRIBUTORS ``AS IS'' AND
- * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
- * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
- * ARE DISCLAIMED.  IN NO EVENT SHALL THE INSTITUTE OR CONTRIBUTORS BE LIABLE
- * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
- * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
- * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
- * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
- * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
- * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
- * SUCH DAMAGE.
- *
- * Author: Adam Dunkels <adam@sics.se>
- *
- * $Id: pt.h,v 1.6 2006/06/03 11:29:43 adam Exp $
- */
-
+#pragma once
+#include <cstdint>
 /**
- * \addtogroup pt
- * @{
+ * @brief Структура для хранения состояния протопотока.
  */
-
-/**
- * \file
- * Protothreads implementation.
- * \author
- * Adam Dunkels <adam@sics.se>
- *
- */
-
-#ifndef __PT_H__
-#define __PT_H__
-
-#include "lc.h"
-
 struct pt {
-    lc_t lc;
-    const char* name;
-    bool is_stoped;
+    size_t lc{};          ///< Локальная переменная для хранения текущей линии выполнения (используется switch-case).
+    const char *name{};   ///< Имя протопотока (для отладки или идентификации).
+    bool is_stopped{};    ///< Флаг, указывающий, остановлен ли протопоток.
 };
 
-#define PT_WAITING 0
-#define PT_EXITED  1
-#define PT_ENDED   2
-#define PT_YIELDED 3
+/**
+ * @enum THREAD_STATE
+ * @brief Перечисление возможных состояний протопотока.
+ */
+enum THREAD_STATE : uint8_t {
+    PT_WAITING,  ///< Ожидание выполнения условия.
+    PT_EXITED,   ///< Завершение выполнения протопотока.
+    PT_ENDED,    ///< Протопоток завершил выполнение.
+    PT_YIELDED,  ///< Протопоток был приостановлен (yield).
+    PT_STOPPED   ///< Протопоток был остановлен.
+};
 
 /**
- * \name Initialization
- * @{
+ * @brief Инициализация протопотока.
+ * @param pt Указатель на структуру протопотока.
  */
+#define PT_INIT(pt)   (pt)->lc = 0; \
+                      (pt)->is_stopped = false;
 
 /**
- * Initialize a protothread.
- *
- * Initializes a protothread. Initialization must be done prior to
- * starting to execute the protothread.
- *
- * \param pt A pointer to the protothread control structure.
- *
- * \sa PT_SPAWN()
- *
- * \hideinitializer
+ * @brief Объявление функции протопотока.
+ * @param name Имя функции протопотока.
  */
-#define PT_INIT(pt)   LC_INIT((pt)->lc); (pt)->is_stoped=false;
-
-/** @} */
+#define PT_THREAD(name) char name(struct pt* thread_context)
 
 /**
- * \name Declaration and definition
- * @{
+ * @brief Начало протопотока. Создает локальный флаг PT_YIELD_FLAG и инициализирует switch-case.
+ * @param pt Указатель на структуру протопотока.
  */
+#define PT_BEGIN(pt) bool PT_YIELD_FLAG = true; \
+                     switch((pt)->lc) {         \
+                     case 0:
 
 /**
- * Declaration of a protothread function.
- *
- * This macro is used to declare a protothread function. Protothreads
- * function should be declared with this macro, but can also be
- * declared as regular C functions that return an integer value.
- *
- * \param name_args The name and arguments of the C function
- * implementing the protothread.
- *
- * \hideinitializer
+ * @brief Конец протопотока. Завершает switch-case и обновляет состояние протопотока.
+ * @param pt Указатель на структуру протопотока.
  */
-#define PT_THREAD(name) char (name)(struct pt* pt, const char* task_name=#name)
+#define PT_END(pt) default:break;}         \
+                   PT_YIELD_FLAG = false;  \
+                   (pt)->is_stopped = true;\
+                   (pt)->lc = 0;           \
+                   return PT_ENDED;
 
 /**
- * Declare the start of a protothread inside the C function
- * implementing the protothread.
- *
- * This macro is used to declare the starting point of a
- * protothread. It should be placed at the start of the function in
- * which the protothread runs. All C statements above the PT_BEGIN()
- * invokation will be executed each time the protothread is scheduled.
- *
- * \param pt A pointer to the protothread control structure.
- *
- * \hideinitializer
+ * @brief Ожидание выполнения условия. Протопоток приостанавливается до тех пор, пока условие не выполнится.
+ * @param pt Указатель на структуру протопотока.
+ * @param condition Условие для продолжения выполнения.
  */
-#define PT_BEGIN(pt) { char PT_YIELD_FLAG = 1; LC_RESUME((pt)->lc)
-
-/**
- * Declare the end of a protothread.
- *
- * This macro is used for declaring that a protothread ends. It must
- * always be used together with a matching PT_BEGIN() macro.
- *
- * \param pt A pointer to the protothread control structure.
- *
- * \hideinitializer
- */
-#define PT_END(pt) LC_END((pt)->lc); PT_YIELD_FLAG = 0; \
-                   PT_INIT(pt);(pt)->is_stoped=true; return PT_ENDED; }
-
-/** @} */
-
-/**
- * \name Blocked wait
- * @{
- */
-
-/**
- * Block and wait until condition is true.
- *
- * This macro blocks the protothread until the specified condition is
- * true.
- *
- * \param pt A pointer to the protothread control structure.
- * \param condition The condition.
- *
- * \hideinitializer
- */
-#define PT_WAIT_UNTIL(pt, condition)	        \
-  do {						\
-    LC_SET((pt)->lc);				\
-    if(!(condition)) {				\
-      return PT_WAITING;			\
-    }						\
+#define PT_WAIT_UNTIL(pt, condition) \
+  do {                               \
+    (pt)->lc = __LINE__;             \
+    case __LINE__:                   \
+    if (!(condition)) {              \
+      return PT_WAITING;             \
+    }                                \
   } while(0)
 
 /**
- * Block and wait while condition is true.
- *
- * This function blocks and waits while condition is true. See
- * PT_WAIT_UNTIL().
- *
- * \param pt A pointer to the protothread control structure.
- * \param cond The condition.
- *
- * \hideinitializer
+ * @brief Ожидание, пока условие не станет ложным.
+ * @param pt Указатель на структуру протопотока.
+ * @param cond Условие для проверки.
  */
 #define PT_WAIT_WHILE(pt, cond)  PT_WAIT_UNTIL((pt), !(cond))
 
-/** @} */
-
 /**
- * \name Hierarchical protothreads
- * @{
- */
-
-/**
- * Block and wait until a child protothread completes.
- *
- * This macro schedules a child protothread. The current protothread
- * will block until the child protothread completes.
- *
- * \note The child protothread must be manually initialized with the
- * PT_INIT() function before this function is used.
- *
- * \param pt A pointer to the protothread control structure.
- * \param thread The child protothread with arguments
- *
- * \sa PT_SPAWN()
- *
- * \hideinitializer
+ * @brief Ожидание завершения другого протопотока.
+ * @param pt Указатель на структуру протопотока.
+ * @param thread Протопоток для ожидания.
  */
 #define PT_WAIT_THREAD(pt, thread) PT_WAIT_WHILE((pt), PT_SCHEDULE(thread))
 
 /**
- * Spawn a child protothread and wait until it exits.
- *
- * This macro spawns a child protothread and waits until it exits. The
- * macro can only be used within a protothread.
- *
- * \param pt A pointer to the protothread control structure.
- * \param child A pointer to the child protothread's control structure.
- * \param thread The child protothread with arguments
- *
- * \hideinitializer
+ * @brief Создание и выполнение дочернего протопотока.
+ * @param pt Указатель на структуру протопотока.
+ * @param child Дочерний протопоток.
+ * @param thread Функция дочернего протопотока.
  */
-#define PT_SPAWN(pt, child, thread)		\
-  do {						\
-    PT_INIT((child));				\
-    PT_WAIT_THREAD((pt), (thread));		\
-  } while(0)
-
-/** @} */
-
-/**
- * \name Exiting and restarting
- * @{
- */
-
-/**
- * Restart the protothread.
- *
- * This macro will block and cause the running protothread to restart
- * its execution at the place of the PT_BEGIN() call.
- *
- * \param pt A pointer to the protothread control structure.
- *
- * \hideinitializer
- */
-#define PT_RESTART(pt)				\
-  do {						\
-    PT_INIT(pt);          \
-    return PT_WAITING;			\
+#define PT_SPAWN(pt, child, thread) \
+  do {                              \
+    PT_INIT((child));               \
+    PT_WAIT_THREAD((pt), (thread)); \
   } while(0)
 
 /**
- * Exit the protothread.
- *
- * This macro causes the protothread to exit. If the protothread was
- * spawned by another protothread, the parent protothread will become
- * unblocked and can continue to run.
- *
- * \param pt A pointer to the protothread control structure.
- *
- * \hideinitializer
+ * @brief Перезапуск протопотока.
+ * @param pt Указатель на структуру протопотока.
  */
-#define PT_EXIT(pt)				\
-  do {						\
+#define PT_RESTART(pt) \
+  do {                 \
     PT_INIT(pt);       \
-    (pt)->is_stoped=true;                   \
-    return PT_EXITED;			\
-  } while(0)
-
-/** @} */
-
-/**
- * \name Calling a protothread
- * @{
- */
-
-/**
- * Schedule a protothread.
- *
- * This function shedules a protothread. The return value of the
- * function is non-zero if the protothread is running or zero if the
- * protothread has exited.
- *
- * \param f The call to the C function implementing the protothread to
- * be scheduled
- *
- * \hideinitializer
- */
-//#define PT_SCHEDULE(f) ((f) == PT_WAITING)
-#define PT_SCHEDULE(f, pt) if(!pt.is_stoped)f(&pt);
-
-/** @} */
-
-/**
- * \name Yielding from a protothread
- * @{
- */
-
-/**
- * Yield from the current protothread.
- *
- * This function will yield the protothread, thereby allowing other
- * processing to take place in the system.
- *
- * \param pt A pointer to the protothread control structure.
- *
- * \hideinitializer
- */
-#define PT_YIELD(pt)				\
-  do {						\
-    PT_YIELD_FLAG = 0;				\
-    LC_SET((pt)->lc);				\
-    if(PT_YIELD_FLAG == 0) {			\
-      return PT_YIELDED;			\
-    }						\
+    return PT_WAITING; \
   } while(0)
 
 /**
- * \brief      Yield from the protothread until a condition occurs.
- * \param pt   A pointer to the protothread control structure.
- * \param cond The condition.
- *
- *             This function will yield the protothread, until the
- *             specified condition evaluates to true.
- *
- *
- * \hideinitializer
+ * @brief Завершение выполнения протопотока.
+ * @param pt Указатель на структуру протопотока.
  */
-#define PT_YIELD_UNTIL(pt, cond)		\
-  do {						\
-    PT_YIELD_FLAG = 0;				\
-    LC_SET((pt)->lc);				\
-    if((PT_YIELD_FLAG == 0) || !(cond)) {	\
-      return PT_YIELDED;			\
-    }						\
+#define PT_EXIT(pt) \
+  do {              \
+    (pt)->lc = 0;   \
+    return PT_EXITED; \
   } while(0)
 
-/** @} */
+/**
+ * @brief Запуск протопотока, если он не остановлен.
+ * @param name Имя протопотока.
+ */
+#define PT_SCHEDULE(name) if (!name##_context.is_stopped) { \
+                            name(&name##_context);           \
+                          }
 
+/**
+ * @brief Приостановка выполнения протопотока.
+ * @param pt Указатель на структуру протопотока.
+ */
+#define PT_YIELD(pt) \
+  do {               \
+    PT_YIELD_FLAG = false; \
+    (pt)->lc = __LINE__;   \
+    case __LINE__:         \
+    if (!PT_YIELD_FLAG) {  \
+      return PT_YIELDED;   \
+    }                      \
+  } while(0)
 
+/**
+ * @brief Приостановка выполнения протопотока до выполнения условия.
+ * @param pt Указатель на структуру протопотока.
+ * @param cond Условие для продолжения выполнения.
+ */
+#define PT_YIELD_UNTIL(pt, cond) \
+  do {                           \
+    PT_YIELD_FLAG = false;       \
+    (pt)->lc = __LINE__;         \
+    case __LINE__:               \
+    if ((!PT_YIELD_FLAG) || !(cond)) { \
+      return PT_YIELDED;         \
+    }                            \
+  } while(0)
 
-#define PT_SCHEDULE_RESUME(pt)  (pt)->is_stoped=false;
-#endif /* __PT_H__ */
+/**
+ * @brief Приостановка выполнения протопотока до тех пор, пока условие не станет ложным.
+ * @param pt Указатель на структуру протопотока.
+ * @param cond Условие для проверки.
+ */
+#define PT_YIELD_WHILE(pt, cond) \
+  do {                           \
+    PT_YIELD_FLAG = false;       \
+    (pt)->lc = __LINE__;         \
+    case __LINE__:               \
+    if ((!PT_YIELD_FLAG) || (cond)) { \
+      return PT_YIELDED;         \
+    }                            \
+  } while(0)
 
-/** @} */
+/**
+ * @brief Остановка выполнения протопотока.
+ * @param pt Указатель на структуру протопотока.
+ */
+#define PT_STOP(pt) \
+  do {              \
+    (pt)->lc = 0;   \
+    (pt)->is_stopped = true; \
+    return PT_STOPPED;       \
+  } while(0)
+
+/**
+ * @brief Ожидание указанного времени.
+ * @param pt Указатель на структуру протопотока.
+ * @param ms Время ожидания в миллисекундах.
+ */
+#define PT_WAIT(pt, ms) \
+  do {                  \
+    delay(ms);          \
+    PT_YIELD_FLAG = false;  \
+    (pt)->lc = __LINE__;    \
+    case __LINE__:          \
+    if ((!PT_YIELD_FLAG) || delay) { \
+      return PT_YIELDED;    \
+    }                       \
+  } while(0)
+
+/**
+ * @brief Возобновление выполнения протопотока.
+ * @param name Имя протопотока.
+ */
+#define PT_SCHEDULE_RESUME(name) name##_context.is_stopped = false;
+
+/**
+ * @brief Объявление протопотока с его контекстом.
+ * @param name Имя протопотока.
+ */
+#define PT_THREAD_DECL(name) static pt name##_context{0, #name, false}; \
+                             static char name(struct pt* thread_context);
