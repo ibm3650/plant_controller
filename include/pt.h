@@ -117,7 +117,7 @@ enum THREAD_STATE : uint8_t {
  * @param name Имя протопотока.
  */
 #define PT_SCHEDULE(name) if (!name##_context.is_stopped) { \
-                            name(&name##_context);           \
+                            (void)name(&name##_context);           \
                           }
 
 /**

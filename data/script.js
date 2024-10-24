@@ -79,13 +79,14 @@ $(document).ready(function() {
     });
     //FIXME: После удаления записи, необходимо удалить её из таблицы
     $('#record_table').on('click', '.delete-btn', function() {
+        const element = $(this).closest('tr');
         $.ajax({
             url: '/delete_record',
             method: 'POST',
             contentType: 'application/json',
-            data: JSON.stringify({address: parseInt($(this).closest('tr').attr('id'))}),
+            data: JSON.stringify({address: parseInt(element.attr('id'))}),
             success: function (record) {
-                $(this).closest('tr').remove();
+                element.remove();
             }
         });
     });

@@ -1,3 +1,13 @@
+#pragma clang diagnostic push
+#pragma ide diagnostic ignored "cppcoreguidelines-pro-bounds-array-to-pointer-decay"
+#pragma ide diagnostic ignored "cppcoreguidelines-pro-bounds-pointer-arithmetic"
+#pragma ide diagnostic ignored "modernize-use-trailing-return-type"
+#pragma ide diagnostic ignored "fuchsia-default-arguments-calls"
+#pragma ide diagnostic ignored "misc-include-cleaner"
+#pragma ide diagnostic ignored "cppcoreguidelines-avoid-magic-numbers"
+
+#include "Esp.h"
+#include "Updater.h"
 #include "async_wait.h"
 #include "debug.h"
 #include "ds1307.h"
@@ -10,7 +20,6 @@
 #include <ctime>
 #include <queue>
 #include <vector>
-
 
 template<typename T, typename... args_pack>
 static void print_variadic(const T &first, args_pack... args) {
@@ -132,16 +141,45 @@ PT_THREAD_DECL(entries_processing);
 PT_THREAD_DECL(clock_manager);
 
 
+void handleFileUpload() {
+    HTTPUpload &upload = server.upload();
 
+    if (upload.status == UPLOAD_FILE_START) {
+        Serial.printf("Update: %s\n", upload.filename.c_str());
 
+        // Получаем размер прошивки из заголовка
+        uint32_t const maxSketchSpace = (EspClass::getFreeSketchSpace() - 0x1000) & 0xFFFFF000;
+        LOG_DEBUG("Update", "Max sketch space", maxSketchSpace);
+        // Проверяем, корректен ли размер
+        if (maxSketchSpace == 0) {
+            Serial.println("Ошибка: некорректный размер прошивки!");
+            server.send(500, "text/plain", "Ошибка: некорректный размер прошивки!");
+            return;
+        }
 
-
-
-
-
-
-
-//ntp::ntp_client ntp_client("pool.ntp.org");
+        // Инициализация OTA с указанием размера
+        if (!Update.begin(maxSketchSpace)) {
+            Update.printError(Serial);
+            server.send(500, "text/plain", "Ошибка инициализации Update!");
+            return;
+        }
+    } else if (upload.status == UPLOAD_FILE_WRITE) {
+        // запись данных во время загрузки
+        if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
+            Update.printError(Serial);
+        }
+    } else if (upload.status == UPLOAD_FILE_END) {
+        if (Update.end(true)) { // завершение OTA
+            Serial.printf("Update Success: %u\nRebooting...\n", upload.totalSize);
+            server.send(200, "text/plain", "Update Success! Rebooting...");
+            delay(1000);
+            EspClass::restart(); // перезагрузка после успешного обновления
+        } else {
+            Update.printError(Serial);
+            server.send(500, "text/plain", "Update Failed!");
+        }
+    }
+}
 
 void setup() {
     Serial.begin(115200);
@@ -150,24 +188,28 @@ void setup() {
     pinMode(D5, OUTPUT);
     WiFi.onStationModeConnected(wifi_connected_cb);
     WiFi.onStationModeDisconnected(wifi_disconnect_cb);
+    server.on("/", web_index_cb);
     server.on("/add_record", [&]() {
         task_queue.emplace(server.client(), web_add_record_cb);
-        //WiFiClient ntp_client = server.ntp_client();
-        //FIXME: Что значит mutable в контексте лямбда функции
-////        auto task = [ntp_client]() mutable {
-////            ntp_client.print("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n");
-////        };
     });
-    //server.on("/add_record", web_add_record_cb);
-    // server.on("/get_records",  web_get_record_cb);
     server.on("/get_records", [&]() {
         task_queue.emplace(server.client(), web_get_record_cb);
     });
-    //server.on("/delete_record",  web_delete_record_cb);
     server.on("/delete_record", [&]() {
         task_queue.emplace(server.client(), web_delete_record_cb);
     });
-    server.on("/", web_index_cb);
+    server.on("/ota", HTTP_GET, []() {
+        LOG_DEBUG("Request", __FUNCTION__, server.uri());
+        File file = SPIFFS.open("/ota.html", "r");
+        if (!file) {
+            return;
+        }
+        server.streamFile(file, "text/html");
+        file.close();
+    });
+    server.on("/upload", HTTP_POST, []() {
+        server.send(200, "text/plain", "");
+    }, handleFileUpload);
     server.onNotFound([]() {
         LOG_DEBUG("Request", server.uri());
         File file = SPIFFS.open(server.uri(), "r");
@@ -179,20 +221,10 @@ void setup() {
         server.streamFile(file, get_mime_type(server.uri()));
         file.close();
     });
-    //server.keepAlive(true);
-    //server.keepAlive(true);
     server.begin();
     ntp_client.set_update_interval(60);
     ntp_client.set_timezone_offset(3);
     ntp_client.set_timeout(1000);
-    //cache();
-    //uint8_t empty_data[eeprom::PAGE_SIZE];
-//    std::fill_n(empty_data, eeprom::PAGE_SIZE, 0x00);  // Заполняем буфер значением 0xFF (или 0x00, если нужно "обнулить")
-//
-//    // Проходим по всей памяти EEPROM, записывая пустые данные
-//    for (size_t i = 0; i < eeprom::STORAGE_SIZE / eeprom::PAGE_SIZE; ++i) {
-//        eeprom::write_page(i * eeprom::PAGE_SIZE, empty_data, eeprom::PAGE_SIZE);
-//    }
 }
 
 
@@ -206,7 +238,7 @@ void loop() {
     PT_SCHEDULE(entries_processing);
     delay(20);//FIXME: Почему так много? Без него веб-сервер не работает нормально. Вероятно из-за того, что не успевает обработать запросы и планировщику нужно время на обработку
     PT_SCHEDULE(web_server);
-    ntp_client.sync_poll();
+    (void) ntp_client.sync_poll();
     server.handleClient();
 }
 
@@ -217,12 +249,12 @@ void loop() {
         sign = -1;
     }
     int32_t accumulator = 0;
-    while (*str) {
+    while (*str != '\0') {
         if (*str < '0' || *str > '9') {
             return 0;
         }
         assert(*str >= '0' && *str <= '9');
-        accumulator = accumulator * 10 + (*str - '0'); // NOLINT(*-magic-numbers)
+        accumulator = accumulator * 10 + (*str - '0');
         str++;
     }
     return accumulator * sign;
@@ -308,8 +340,8 @@ entry_t parse_task_json(const String &json) {
     end_index = json.indexOf(',', start_index);
     const int32_t end_time = json.substring(start_index, end_index).toInt();
 
-    start_index = json.indexOf("smooth_transition") + 19;
-    end_index = json.indexOf(',', start_index);
+   //start_index = json.indexOf("smooth_transition") + 19;
+    //end_index = json.indexOf(',', start_index);
     //const bool smooth_transition = json.substring(start_index, end_index) == "true";
 
     start_index = json.indexOf("duration") + 10;
@@ -349,6 +381,7 @@ String create_json() {
 
 void web_add_record_cb(WiFiClient &client) {
     const auto payload = server.arg("plain");
+    const auto node = parse_task_json(payload);
     LOG_DEBUG("Request", server.uri(), payload);
     client.print("HTTP/1.1 200 OK\r\n");
     client.print("Content-Type: application/json\r\n");
@@ -356,38 +389,35 @@ void web_add_record_cb(WiFiClient &client) {
     client.print(payload.length());
     client.print("\r\n\r\n");
     client.print(payload);
-    //server.send(200, "application/json", payload);
-    insert_node(parse_task_json(payload));
+    insert_node(node);
+    cache_push(node);
 }
 
 
 void web_delete_record_cb(WiFiClient &client) {
     const auto payload = server.arg("plain");
     LOG_DEBUG("Request", server.uri(), payload, payload.substring(payload.indexOf(':') + 1, payload.length() - 1));
-    // server.send(200, "application/json", payload);
     client.print("HTTP/1.1 200 OK\r\n");
     client.print("Content-Type: application/json\r\n");
     client.print("Content-Length: ");
     client.print(payload.length());
     client.print("\r\n\r\n");
     client.print(payload);
-    delete_node(str_to_int(payload.substring(payload.indexOf(':') + 1, payload.length() - 1).c_str()));
+    const auto address = str_to_int(payload.substring(payload.indexOf(':') + 1, payload.length() - 1).c_str());
+    delete_node(address);
+    cache_pop(get_node(address));
 }
 
 void web_get_record_cb(WiFiClient &client) {
     LOG_DEBUG("Request", __FUNCTION__, client.remoteIP().toString());
     const String json_out{create_json()};
     LOG_DEBUG("Request JSON", __FUNCTION__, json_out);
-
-
-    // Отправка ответа
     client.print("HTTP/1.1 200 OK\r\n");
     client.print("Content-Type: application/json\r\n");
     client.print("Content-Length: ");
     client.print(json_out.length());
     client.print("\r\n\r\n");
     client.print(json_out);
-    //server.send(200, "application/json", json_out.c_str());
 }
 
 void web_index_cb() {
@@ -454,14 +484,16 @@ PT_THREAD(led_control) {
 
     PT_BEGIN(thread_context);
             if (pwm_val == 0xFF) {
-                if (led_state == current_state)
+                if (led_state == current_state) {
                     PT_STOP(thread_context);
+                }
                 // PT_EXIT(pt);
                 delay(led_transition_delay);
                 pwm_val = 0;
             } else {
-                if (led_state == current_state)
+                if (led_state == current_state) {
                     current_state = !current_state;
+                }
             }
             for (; pwm_val < 0xFF; ++pwm_val) {
                 analogWrite(D5, current_state ? 0xFF - pwm_val : pwm_val);
@@ -476,35 +508,42 @@ PT_THREAD(led_control) {
 PT_THREAD(entries_processing) {
     std::time_t time_tmp = 0;
     uint32_t curr_min = 0;
-    entry_t item{};
+    static entry_t item{};
     static async_wait delay(0);
     static bool is_processing = false;
+    static bool is_catched = false;
     PT_BEGIN(thread_context);
 
             while (true) {
-                if (is_cache_empty()) {
-                    cache();
-                    //LOG_DEBUG("Cache updated", entriesQueue.size());
-                    if (is_cache_empty()) {
-                        LOG_DEBUG("No entries in cache");
-                        PT_WAIT(thread_context, 60 * 1000);
-                        PT_EXIT(thread_context);
-                    }
-                }
+
                 time_tmp = ds1307::time(0);
                 if (time_tmp == -1) {
                     PT_EXIT(thread_context);
                 }
 
-                //FIXME:При добавлении элемента обновлять кеш
+
                 //LOG_DEBUG("IN cache", entriesQueue.size());
                 Serial.println(time_tmp);
                 curr_min = std::localtime(&time_tmp)->tm_hour * 60 + std::localtime(&time_tmp)->tm_min;
-                item = cache_top();
+
+
+                if(!is_catched && !is_processing) {
+                    if (is_cache_empty()) {
+                        if (cache() == 0) {
+                            LOG_DEBUG("No entries in cache");
+                            PT_WAIT(thread_context, 60 * 1000);
+                            PT_EXIT(thread_context);
+                        }
+                    }
+                    item = cache_top();
+                    is_catched = true;
+                }
+
                 LOG_DEBUG("Current time", curr_min, "Current item", item.start, item.end);
                 if (curr_min >= item.end) {
-                    cache_pop();
+                    cache_pop(item);
                     is_processing = false;
+                    is_catched = false;
                 } else if (curr_min >= static_cast<uint32_t>(item.end - item.transition_time)) {
                     if (!is_processing) {
                         auto led_transition_delay3 = item.transition_time * 60 * 1000 / 0xFF;
@@ -558,3 +597,5 @@ PT_THREAD(clock_manager) {
             }
     PT_END(thread_context);
 }
+
+#pragma clang diagnostic pop

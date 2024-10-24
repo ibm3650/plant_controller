@@ -23,12 +23,12 @@
 static std::set<entry_t> entriesQueue;
 
 
-void cache() {
+size_t cache() {
     uint8_t buffer[eeprom::PAGE_SIZE];
 
     // Начинаем с первого элемента
     uint16_t current_address = 0x0000;
-
+    size_t ctr = 0;
     while (current_address < eeprom::STORAGE_SIZE) {
         LOG_DEBUG("Reading EEPROM at address", current_address);
         // Определяем страницу и смещение в ней
@@ -47,12 +47,8 @@ void cache() {
             const auto curr_min = (std::localtime(&current_time)->tm_hour * 60) + std::localtime(&current_time)->tm_min;
             //if (curr_min >= current_element->start || curr_min <= current_element->end) {
             if (curr_min <= current_element->end) {
-                entriesQueue.insert(*current_element);
-                if (entriesQueue.size() >= CACHE_SIZE) {
-                    auto lastElement = std::prev(entriesQueue.end());
-                    // Удаляем последний элемент
-                    entriesQueue.erase(lastElement);
-                }
+                ctr++;
+                cache_push(*current_element);
             }
         }
 
@@ -64,7 +60,7 @@ void cache() {
         // Переходим к следующему элементу по указателю next_node
         current_address = current_element->next_node;
     }
-
+    return ctr;
     // return nodes;  // Возвращаем все найденные элементы
 }
 
@@ -218,4 +214,16 @@ entry_t cache_top() {
 
 void cache_pop() {
     entriesQueue.erase(cache_top());
+}
+
+void cache_push(const entry_t &entry) {
+    entriesQueue.insert(entry);
+    if (entriesQueue.size() >= CACHE_SIZE) {
+        auto lastElement = std::prev(entriesQueue.end());
+        entriesQueue.erase(lastElement);
+    }
+}
+
+void cache_pop(const entry_t &entry) {
+    entriesQueue.erase(entry);
 }
