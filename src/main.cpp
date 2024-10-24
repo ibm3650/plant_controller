@@ -6,8 +6,6 @@
 #pragma ide diagnostic ignored "misc-include-cleaner"
 #pragma ide diagnostic ignored "cppcoreguidelines-avoid-magic-numbers"
 
-#include "Esp.h"
-#include "Updater.h"
 #include "async_wait.h"
 #include "debug.h"
 #include "ds1307.h"
@@ -16,6 +14,8 @@
 #include "pt.h"
 #include <Arduino.h>
 #include <ESP8266WebServer.h>
+#include <Esp.h>
+#include <Updater.h>
 #include <Wire.h>
 #include <ctime>
 #include <queue>
@@ -499,7 +499,7 @@ PT_THREAD(led_control) {
                 analogWrite(D5, current_state ? 0xFF - pwm_val : pwm_val);
                 PT_WAIT(thread_context, led_transition_delay);
                 Serial.printf("LED VALUE: %d#%d\n", pwm_val, current_state);
-                PT_YIELD(thread_context);
+                //PT_YIELD(thread_context);
             }
             current_state = led_state;
     PT_END(thread_context);
@@ -544,18 +544,18 @@ PT_THREAD(entries_processing) {
                     cache_pop(item);
                     is_processing = false;
                     is_catched = false;
+                    set_led(false);
                 } else if (curr_min >= static_cast<uint32_t>(item.end - item.transition_time)) {
                     if (!is_processing) {
                         auto led_transition_delay3 = item.transition_time * 60 * 1000 / 0xFF;
                         curr_min -= item.end - item.transition_time;
-                        if (curr_min >= item.transition_time) {
-                            set_led(false);
-                        } else {
-                            curr_min *= 60 * 1000;
-                            curr_min /= led_transition_delay3;
-                            set_led(false, item.transition_time * 60 * 1000, curr_min);
-                        }
+                        curr_min *= 60 * 1000;
+                        curr_min /= led_transition_delay3;
+                        set_led(false, item.transition_time * 60 * 1000, curr_min);
                         is_processing = true;
+                    }
+                    else{
+                        set_led(false, item.transition_time * 60 * 1000, curr_min);
                     }
                 } else if (curr_min >= item.start) {
                     if (!is_processing) {
