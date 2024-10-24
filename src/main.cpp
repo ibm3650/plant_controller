@@ -94,9 +94,7 @@ static const char *get_mime_type(const String &filename);
 
 static entry_t parse_task_json(const String &json);
 
-
 String create_json();
-
 
 void set_led(bool state, size_t transition = 0, uint8_t pwm = 0);
 
@@ -112,13 +110,10 @@ void wifi_connected_cb(const WiFiEventStationModeConnected &event);
 // TODO(kandu): Оптимистичный ответ
 void web_add_record_cb(WiFiClient &client);
 
-// TODO(kandu): получать все записи
 // TODO(kandu): оптимальное формирование json
 // TODO(kandu): использовать по возможности статическое выделение памяти
 // TODO(kandu): строковые литералы во флеш памяти
-// TODO(kandu): использовать кеш
 // TODO(kandu): Оптимизировать эту функцию
-//void web_get_record_cb();
 void web_get_record_cb(WiFiClient &client);
 
 void web_delete_record_cb(WiFiClient &client);
@@ -131,15 +126,11 @@ PT_THREAD_DECL(network_manager);
 // TODO(kandu): Остановка сервера при простое переподключения
 // TODO(kandu): Работа с i2c тоже протопоток
 PT_THREAD_DECL(web_server);
-
 PT_THREAD_DECL(led_control);
 // TODO(kandu): отвязать от сети
 PT_THREAD_DECL(entries_processing);
-// TODO(kandu): Первый байт на страницу EEPROM обозначает, если ли в этой странице свободные ячейки, например после удаления узла из списка, для дефрагментации и эффективной вставки. такие блоки ищутся перед вставкой
-
 // TODO(kandu): полная реализация time по стандарту rfc
 PT_THREAD_DECL(clock_manager);
-
 
 void handleFileUpload() {
     HTTPUpload &upload = server.upload();
@@ -227,7 +218,6 @@ void setup() {
     ntp_client.set_timeout(1000);
 }
 
-
 void loop() {
     PT_SCHEDULE(led_control);
     PT_SCHEDULE(network_manager);
@@ -240,6 +230,7 @@ void loop() {
     PT_SCHEDULE(web_server);
     (void) ntp_client.sync_poll();
     server.handleClient();
+
 }
 
 [[maybe_unused]] int32_t str_to_int(const char *str) {
@@ -331,7 +322,6 @@ void wifi_connected_cb(const WiFiEventStationModeConnected & /*event*/) {
 }
 
 entry_t parse_task_json(const String &json) {
-    // Сохраним индексы, чтобы избежать повторных вычислений
     int start_index = json.indexOf("start_time") + 12;
     int end_index = json.indexOf(',', start_index);
     const int32_t start_time = json.substring(start_index, end_index).toInt();
@@ -340,17 +330,15 @@ entry_t parse_task_json(const String &json) {
     end_index = json.indexOf(',', start_index);
     const int32_t end_time = json.substring(start_index, end_index).toInt();
 
-   //start_index = json.indexOf("smooth_transition") + 19;
-    //end_index = json.indexOf(',', start_index);
-    //const bool smooth_transition = json.substring(start_index, end_index) == "true";
-
     start_index = json.indexOf("duration") + 10;
     end_index = json.indexOf('}', start_index);
     const int32_t duration = json.substring(start_index, end_index).toInt();
 
     return {static_cast<uint16_t>(start_time),
             static_cast<uint16_t>(end_time),
-            static_cast<uint8_t>(duration)};
+            static_cast<uint8_t>(duration),
+            0x0000,
+            0};
 }
 
 String create_json() {
@@ -378,7 +366,6 @@ String create_json() {
     return json;  // Возвращаем сформированную строку JSON
 }
 
-
 void web_add_record_cb(WiFiClient &client) {
     const auto payload = server.arg("plain");
     const auto node = parse_task_json(payload);
@@ -392,7 +379,6 @@ void web_add_record_cb(WiFiClient &client) {
     insert_node(node);
     cache_push(node);
 }
-
 
 void web_delete_record_cb(WiFiClient &client) {
     const auto payload = server.arg("plain");
@@ -426,7 +412,6 @@ void web_index_cb() {
     if (!file) {
         return;
     }
-
     server.streamFile(file, "text/html");
     file.close();
 }
@@ -441,7 +426,6 @@ PT_THREAD(network_manager) {
                     Serial.print("]");
                     PT_STOP(thread_context);
                 }
-
                 if (tries_ctr >= MAX_WIFI_TRIES) {
                     Serial.println("Too many tries. Timeout");
                     tries_ctr = 0;
@@ -453,7 +437,6 @@ PT_THREAD(network_manager) {
                     Serial.print("Connecting to WIFI [");
                     Serial.print(SSID);
                     Serial.print("] #");
-
                     Serial.println(tries_ctr);
                     PT_WAIT(thread_context, 1 * 1000);
                 }
@@ -477,17 +460,14 @@ PT_THREAD(web_server) {
 }
 
 PT_THREAD(led_control) {
-
     static bool current_state = false;
     static async_wait delay{0};
-
 
     PT_BEGIN(thread_context);
             if (pwm_val == 0xFF) {
                 if (led_state == current_state) {
                     PT_STOP(thread_context);
                 }
-                // PT_EXIT(pt);
                 delay(led_transition_delay);
                 pwm_val = 0;
             } else {
@@ -495,13 +475,16 @@ PT_THREAD(led_control) {
                     current_state = !current_state;
                 }
             }
-            for (; pwm_val < 0xFF; ++pwm_val) {
-                analogWrite(D5, current_state ? 0xFF - pwm_val : pwm_val);
-                PT_WAIT(thread_context, led_transition_delay);
-                Serial.printf("LED VALUE: %d#%d\n", pwm_val, current_state);
-                //PT_YIELD(thread_context);
+            if (led_transition_delay == 0) {
+                analogWrite(D5, led_state ? 0xFF : 0);
+                current_state = led_state;
+            } else {
+                for (; pwm_val < 0xFF; ++pwm_val) {
+                    analogWrite(D5, current_state ? 0xFF - pwm_val : pwm_val);
+                    PT_WAIT(thread_context, led_transition_delay);
+                }
+                current_state = led_state;
             }
-            current_state = led_state;
     PT_END(thread_context);
 }
 
@@ -527,7 +510,7 @@ PT_THREAD(entries_processing) {
                 curr_min = std::localtime(&time_tmp)->tm_hour * 60 + std::localtime(&time_tmp)->tm_min;
 
 
-                if(!is_catched && !is_processing) {
+                if (!is_catched && !is_processing) {
                     if (is_cache_empty()) {
                         if (cache() == 0) {
                             LOG_DEBUG("No entries in cache");
@@ -553,8 +536,7 @@ PT_THREAD(entries_processing) {
                         curr_min /= led_transition_delay3;
                         set_led(false, item.transition_time * 60 * 1000, curr_min);
                         is_processing = true;
-                    }
-                    else{
+                    } else {
                         set_led(false, item.transition_time * 60 * 1000, curr_min);
                     }
                 } else if (curr_min >= item.start) {
