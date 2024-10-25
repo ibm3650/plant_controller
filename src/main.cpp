@@ -391,7 +391,10 @@ void web_delete_record_cb(WiFiClient &client) {
     client.print(payload);
     const auto address = str_to_int(payload.substring(payload.indexOf(':') + 1, payload.length() - 1).c_str());
     delete_node(address);
-    cache_pop(get_node(address));
+    const auto node = get_node(address);
+    if (node) {
+        cache_pop(node.value());
+    }
 }
 
 void web_get_record_cb(WiFiClient &client) {

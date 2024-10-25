@@ -35,13 +35,13 @@ struct entry_t {
 
 size_t cache();
 
-entry_t get_node(uint16_t address);
+std::optional<entry_t> get_node(uint16_t address);
 
-void insert_node(const entry_t &entry);
+[[nodiscard]] bool insert_node(const entry_t &entry);
 
 std::vector<std::pair<uint16_t, entry_t>> get_all_nodes();
 
-void delete_node(uint16_t address);
+[[nodiscard]] bool delete_node(uint16_t address);
 
 bool is_cache_empty();
 
