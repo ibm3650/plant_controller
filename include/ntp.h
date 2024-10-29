@@ -102,6 +102,8 @@ namespace ntp {
 
         [[nodiscard]] bool is_synchronized() const noexcept;
 
+        [[nodiscard]] std::optional<size_t> seconds_since_last_update() const noexcept;
+
         void set_timezone_offset(uint8_t offset) noexcept;
 
         void set_timeout(size_t timeout) noexcept;
@@ -109,7 +111,8 @@ namespace ntp {
         void set_update_interval(size_t interval) noexcept;
 
     private:
-        //FIXME: Учитывать потокобезопасность. Обновлять и получать можно одновременно,использовать таймер задержки. избегать гонок
+        //FIXME: Учитывать потокобезопасность. Обновлять и получать можно одновременно,
+        // использовать таймер задержки. избегать гонок
         sntp_msg_t message_{};
         async_wait delay_timer_{0};
         size_t connection_timeout_{CONNECTION_TIMEOUT};

@@ -8,8 +8,6 @@
 //
 #include "24c32.h"
 #include <Wire.h>
-#include <algorithm>
-#include <span>
 
 //Размер буфера шины TWI - длинна адреса (2 байта)
 static constexpr auto eeprom_block_size = std::min(TWI_BUFFER_LENGTH - sizeof(uint16_t),

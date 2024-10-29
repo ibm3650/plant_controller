@@ -8,7 +8,7 @@
 #include <optional>
 
 
-//TODO:Оптимизация инвертирования порядка бит
+// TODO(kandu): Оптимизация инвертирования порядка бит
 uint8_t invert_bits(uint8_t value, size_t bits) {
     uint8_t reversed = 0;
     for (size_t i = 0; i < bits; ++i) {
@@ -132,10 +132,6 @@ void ntp::ntp_client::set_server(std::string_view address, uint16_t port) noexce
     message_.mode = static_cast<uint8_t>(MODE::CLIENT);
     message_.version = 4;
     message_.correction = static_cast<uint8_t>(CORRECTION::NOT_SYNC);
-    // uint8_t b = 0b11100011;
-    // memcpy(&message_,&b,1);
-    //Serial.print("SNTP Message:");Serial.println(*reinterpret_cast<uint8_t*>(&message_), BIN);
-    // Serial.print("SNTP Message1:");Serial.println(val, BIN);
     size_t packet_size = socket_.write(reinterpret_cast<uint8_t *>(&message_), sizeof(message_));
     if (packet_size == 0) {
         Serial.println("#NTP Failed to write to packet");
@@ -153,8 +149,6 @@ void ntp::ntp_client::set_server(std::string_view address, uint16_t port) noexce
     }
     const int len = socket_.read(reinterpret_cast<uint8_t *>(&message_), sizeof(message_));
     last_update_ = millis();
-
-    //print_sntp_msg(message_);
     return true;
 }
 
@@ -188,8 +182,16 @@ std::optional<std::time_t> ntp::ntp_client::time() const noexcept {
         return std::nullopt;
     }
     return ntp_to_timestamp(message_.transmit_timestamp.seconds) +
-           time_zone_offset_ * 3600 +
-           (millis() - last_update_) / 1000;
+           (time_zone_offset_ * 3600) +
+           ((millis() - last_update_) / 1000);
+}
+
+std::optional<size_t> ntp::ntp_client::seconds_since_last_update() const noexcept {
+    if (last_update_ == 0) {
+        return std::nullopt;
+    }
+    return (millis() - last_update_) / 1000;
+
 }
 
 

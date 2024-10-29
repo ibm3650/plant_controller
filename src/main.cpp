@@ -7,7 +7,7 @@
 #pragma ide diagnostic ignored "cppcoreguidelines-avoid-magic-numbers"
 
 #include "async_wait.h"
-#include "debug.h"
+
 #include "ds1307.h"
 #include "eeprom_storage.h"
 #include "ntp.h"
@@ -20,6 +20,33 @@
 #include <ctime>
 #include <queue>
 #include <vector>
+
+enum class LogLevel {
+    DEBUG,
+    INFO,
+    WARNING,
+    ERROR
+};
+
+// Макрос для текущего уровня отладки
+#ifdef DEBUGN
+constexpr LogLevel CURRENT_LOG_LEVEL = LogLevel::DEBUG;  // Включаем отладку
+#else
+constexpr LogLevel CURRENT_LOG_LEVEL = LogLevel::ERROR;  // Отключаем отладку, оставляем только ошибки
+#endif
+
+#ifdef DEBUGN
+#define LOG_DEBUG(...)   log_message(LogLevel::DEBUG, __FILE__, __LINE__, __VA_ARGS__)
+#define LOG_INFO(...)    log_message(LogLevel::INFO, __FILE__, __LINE__, __VA_ARGS__)
+#define LOG_WARNING(...) log_message(LogLevel::WARNING, __FILE__, __LINE__, __VA_ARGS__)
+#define LOG_ERROR(...)   log_message(LogLevel::ERROR, __FILE__, __LINE__, __VA_ARGS__)
+#else
+#define LOG_DEBUG(...)   // Не выводим ничего, если отладка отключена
+#define LOG_INFO(...)    // Не выводим ничего, если отладка отключена
+#define LOG_WARNING(...) // Не выводим ничего, если отладка отключена
+#define LOG_ERROR(...)   log_message(LogLevel::ERROR, __FILE__, __LINE__, __VA_ARGS__)  // Только ошибки
+#endif
+
 
 template<typename T, typename... args_pack>
 static void print_variadic(const T &first, args_pack... args) {
@@ -72,7 +99,6 @@ namespace {
     constexpr auto SSID = "MikroTik-B971FF";
     constexpr auto PASSWORD = "pussydestroyer228";
     constexpr uint8_t MAX_WIFI_TRIES = 15;
-
     constexpr uint16_t WEB_PORT = 80;
 
 
@@ -120,6 +146,8 @@ void web_delete_record_cb(WiFiClient &client);
 
 void web_index_cb();
 
+void web_upload_ota_cb();
+
 PT_THREAD_DECL(network_manager);
 // TODO(kandu): Вариант не работает с режимом точки доступа
 // TODO(kandu): Не ждет подключения к ТД или поднятия хотспоста
@@ -132,46 +160,12 @@ PT_THREAD_DECL(entries_processing);
 // TODO(kandu): полная реализация time по стандарту rfc
 PT_THREAD_DECL(clock_manager);
 
-void handleFileUpload() {
-    HTTPUpload &upload = server.upload();
 
-    if (upload.status == UPLOAD_FILE_START) {
-        Serial.printf("Update: %s\n", upload.filename.c_str());
 
-        // Получаем размер прошивки из заголовка
-        uint32_t const maxSketchSpace = (EspClass::getFreeSketchSpace() - 0x1000) & 0xFFFFF000;
-        LOG_DEBUG("Update", "Max sketch space", maxSketchSpace);
-        // Проверяем, корректен ли размер
-        if (maxSketchSpace == 0) {
-            Serial.println("Ошибка: некорректный размер прошивки!");
-            server.send(500, "text/plain", "Ошибка: некорректный размер прошивки!");
-            return;
-        }
-
-        // Инициализация OTA с указанием размера
-        if (!Update.begin(maxSketchSpace)) {
-            Update.printError(Serial);
-            server.send(500, "text/plain", "Ошибка инициализации Update!");
-            return;
-        }
-    } else if (upload.status == UPLOAD_FILE_WRITE) {
-        // запись данных во время загрузки
-        if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
-            Update.printError(Serial);
-        }
-    } else if (upload.status == UPLOAD_FILE_END) {
-        if (Update.end(true)) { // завершение OTA
-            Serial.printf("Update Success: %u\nRebooting...\n", upload.totalSize);
-            server.send(200, "text/plain", "Update Success! Rebooting...");
-            delay(1000);
-            EspClass::restart(); // перезагрузка после успешного обновления
-        } else {
-            Update.printError(Serial);
-            server.send(500, "text/plain", "Update Failed!");
-        }
-    }
-}
-
+//constexpr int operator "" _solve (const char* str, const size_t size)
+//{
+//    return solve (str, size);
+//}
 void setup() {
     Serial.begin(115200);
     Wire.begin();
@@ -179,14 +173,14 @@ void setup() {
     pinMode(D5, OUTPUT);
     WiFi.onStationModeConnected(wifi_connected_cb);
     WiFi.onStationModeDisconnected(wifi_disconnect_cb);
-    server.on("/", web_index_cb);
-    server.on("/add_record", [&]() {
+    server.on("/", HTTP_GET, web_index_cb);
+    server.on("/add_record", HTTP_POST, [&]() {
         task_queue.emplace(server.client(), web_add_record_cb);
     });
-    server.on("/get_records", [&]() {
+    server.on("/get_records", HTTP_GET, [&]() {
         task_queue.emplace(server.client(), web_get_record_cb);
     });
-    server.on("/delete_record", [&]() {
+    server.on("/delete_record", HTTP_POST, [&]() {
         task_queue.emplace(server.client(), web_delete_record_cb);
     });
     server.on("/ota", HTTP_GET, []() {
@@ -198,9 +192,23 @@ void setup() {
         server.streamFile(file, "text/html");
         file.close();
     });
+    server.on("/debug", HTTP_GET, []() {
+        LOG_DEBUG("Request", __FUNCTION__, server.uri());
+        const std::time_t ntptime = ntp_client.time().value_or(-1);
+        const std::time_t ds1307time = ds1307::time(0);
+        const size_t last_update = ntp_client.seconds_since_last_update().value_or(0xFFFFFFFF);
+        const char *placeholder = R"({"unix_epoch_ds1307": %lld, "ntp_time_ds1307": %lld, "seconds_since_last_ntp_update": %u})";
+        const int expected_size = std::snprintf(nullptr, 0, placeholder,
+                                                ds1307time, ntptime, last_update);
+        String buffer("");
+        buffer.reserve(expected_size + 1);
+        std::snprintf(buffer.begin(), expected_size + 1, placeholder,
+                      ds1307time, ntptime, last_update);
+        server.send(200, "application/json", buffer.c_str());
+    });
     server.on("/upload", HTTP_POST, []() {
         server.send(200, "text/plain", "");
-    }, handleFileUpload);
+    }, web_upload_ota_cb);
     server.onNotFound([]() {
         LOG_DEBUG("Request", server.uri());
         File file = SPIFFS.open(server.uri(), "r");
@@ -419,6 +427,38 @@ void web_index_cb() {
     file.close();
 }
 
+void web_upload_ota_cb() {
+    HTTPUpload &upload = server.upload();
+    if (upload.status == UPLOAD_FILE_START) {
+        // Получаем размер прошивки из заголовка
+        uint32_t const maxSketchSpace = (EspClass::getFreeSketchSpace() - 0x1000) & 0xFFFFF000;
+        // Проверяем, корректен ли размер
+        if (maxSketchSpace == 0) {
+            server.send(500, "text/plain", "Ошибка: некорректный размер прошивки!");
+            return;
+        }
+
+        // Инициализация OTA с указанием размера
+        if (!Update.begin(maxSketchSpace)) {
+            server.send(500, "text/plain", "Ошибка инициализации Update!");
+            return;
+        }
+    } else if (upload.status == UPLOAD_FILE_WRITE) {
+        // запись данных во время загрузки
+        if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
+            Update.printError(Serial);
+        }
+    } else if (upload.status == UPLOAD_FILE_END) {
+        if (Update.end(true)) { // завершение OTA
+            server.send(200, "text/plain", "Update Success! Rebooting...");
+            delay(1000);
+            EspClass::restart(); // перезагрузка после успешного обновления
+        } else {
+            server.send(500, "text/plain", "Update Failed!");
+        }
+    }
+}
+
 PT_THREAD(network_manager) {
     static async_wait delay(0);
     PT_BEGIN(thread_context);
@@ -574,7 +614,7 @@ PT_THREAD(clock_manager) {
                 }
                 if (!ds1307::is_enabled()) {
                     LOG_ERROR("DS1307 is not enabled");
-                    ds1307::set_oscilator(true);
+                    ds1307::set_oscillator(true);
                 }
                 ds1307::set_time(ntp_client.time().value());
                 PT_WAIT(thread_context, 12 * 60 * 60 * 1000);
