@@ -20,7 +20,6 @@
 #include <ctime>
 #include <queue>
 #include <vector>
-
 enum class LogLevel {
     DEBUG,
     INFO,
@@ -96,6 +95,9 @@ static void log_message(LogLevel level, const char *file, int line, args_pack...
 
 
 namespace {
+    constexpr uint8_t LED_PIN = 0;
+    constexpr uint8_t SDA_PIN = 3;
+    constexpr uint8_t SCL_PIN = 1;
     constexpr auto SSID = "MikroTik-B971FF";
     constexpr auto PASSWORD = "pussydestroyer228";
     constexpr uint8_t MAX_WIFI_TRIES = 15;
@@ -161,18 +163,33 @@ PT_THREAD_DECL(entries_processing);
 PT_THREAD_DECL(clock_manager);
 
 
-
 //constexpr int operator "" _solve (const char* str, const size_t size)
 //{
 //    return solve (str, size);
 //}
+//#include "led_coroutine.h"
+
+//LedCoroutine led_coroutine;
+
 void setup() {
-    Serial.begin(115200);
-    Wire.begin();
+//    Serial.begin(115200);
+//    Wire.begin();
+//    pinMode(D5, OUTPUT);
+
+
+    Wire.begin(SDA_PIN, SCL_PIN);
+    pinMode(LED_PIN, OUTPUT);
+
     SPIFFS.begin();
-    pinMode(D5, OUTPUT);
     WiFi.onStationModeConnected(wifi_connected_cb);
     WiFi.onStationModeDisconnected(wifi_disconnect_cb);
+    server.on("/set_led", HTTP_GET, [] {
+        String message = "Received arguments:\n";
+        for (uint8_t i = 0; i < server.args(); i++) {
+            message += " " + server.argName(i) + ": " + server.arg(i) + "\n";
+        }
+        server.send(200, "text/plain", message);
+    });
     server.on("/", HTTP_GET, web_index_cb);
     server.on("/add_record", HTTP_POST, [&]() {
         task_queue.emplace(server.client(), web_add_record_cb);
@@ -225,19 +242,28 @@ void setup() {
     ntp_client.set_timezone_offset(3);
     ntp_client.set_timeout(1000);
 }
-
+uint8_t ctr = 0;
+bool flag = true;
 void loop() {
-    PT_SCHEDULE(led_control);
-    PT_SCHEDULE(network_manager);
-    if (WiFi.status() != WL_CONNECTED) {
-        return;
+    analogWrite(LED_PIN,  flag ? ctr++ : ctr--);
+    if (ctr == 0xFF) {
+        flag = false;
     }
-    PT_SCHEDULE(clock_manager);
-    PT_SCHEDULE(entries_processing);
-    delay(20);//FIXME: Почему так много? Без него веб-сервер не работает нормально. Вероятно из-за того, что не успевает обработать запросы и планировщику нужно время на обработку
-    PT_SCHEDULE(web_server);
-    (void) ntp_client.sync_poll();
-    server.handleClient();
+    if (ctr == 0) {
+        flag = true;
+    }
+    delay(25);
+//    PT_SCHEDULE(led_control);
+//    PT_SCHEDULE(network_manager);
+//    if (WiFi.status() != WL_CONNECTED) {
+//        return;
+//    }
+//    PT_SCHEDULE(clock_manager);
+//    PT_SCHEDULE(entries_processing);
+//    delay(20);//FIXME: Почему так много? Без него веб-сервер не работает нормально. Вероятно из-за того, что не успевает обработать запросы и планировщику нужно время на обработку
+//    PT_SCHEDULE(web_server);
+//    (void) ntp_client.sync_poll();
+//    server.handleClient();
 
 }
 
@@ -462,28 +488,28 @@ void web_upload_ota_cb() {
 PT_THREAD(network_manager) {
     static async_wait delay(0);
     PT_BEGIN(thread_context);
-            while (true) {
-                if (WiFi.status() == WL_CONNECTED) {
-                    Serial.print("Connected[");
-                    Serial.print(SSID);
-                    Serial.print("]");
-                    PT_STOP(thread_context);
-                }
-                if (tries_ctr >= MAX_WIFI_TRIES) {
-                    Serial.println("Too many tries. Timeout");
-                    tries_ctr = 0;
-                    WiFi.disconnect();
-                    PT_WAIT(thread_context, 5 * 60 * 1000);
-                } else {
-                    if (tries_ctr++ == 0)
-                        WiFi.begin(SSID, PASSWORD);
-                    Serial.print("Connecting to WIFI [");
-                    Serial.print(SSID);
-                    Serial.print("] #");
-                    Serial.println(tries_ctr);
-                    PT_WAIT(thread_context, 1 * 1000);
-                }
-            }
+    while (true) {
+        if (WiFi.status() == WL_CONNECTED) {
+            Serial.print("Connected[");
+            Serial.print(SSID);
+            Serial.print("]");
+            PT_STOP(thread_context);
+        }
+        if (tries_ctr >= MAX_WIFI_TRIES) {
+            Serial.println("Too many tries. Timeout");
+            tries_ctr = 0;
+            WiFi.disconnect();
+            PT_WAIT(thread_context, 5 * 60 * 1000);
+        } else {
+            if (tries_ctr++ == 0)
+                WiFi.begin(SSID, PASSWORD);
+            Serial.print("Connecting to WIFI [");
+            Serial.print(SSID);
+            Serial.print("] #");
+            Serial.println(tries_ctr);
+            PT_WAIT(thread_context, 1 * 1000);
+        }
+    }
     PT_END(thread_context);
 }
 
@@ -491,14 +517,14 @@ PT_THREAD(web_server) {
     WiFiClient client1;
     std::function<void(WiFiClient &)> functor;
     PT_BEGIN(thread_context);
-            while (true) {
-                PT_YIELD_WHILE(thread_context, task_queue.empty());
-                LOG_DEBUG("New task count:", __FUNCTION__, task_queue.size());
-                client1 = task_queue.front().first;
-                functor = task_queue.front().second;
-                task_queue.pop();
-                functor(client1);
-            }
+    while (true) {
+        PT_YIELD_WHILE(thread_context, task_queue.empty());
+        LOG_DEBUG("New task count:", __FUNCTION__, task_queue.size());
+        client1 = task_queue.front().first;
+        functor = task_queue.front().second;
+        task_queue.pop();
+        functor(client1);
+    }
     PT_END(thread_context);
 }
 
@@ -507,27 +533,27 @@ PT_THREAD(led_control) {
     static async_wait delay{0};
 
     PT_BEGIN(thread_context);
-            if (pwm_val == 0xFF) {
-                if (led_state == current_state) {
-                    PT_STOP(thread_context);
-                }
-                delay(led_transition_delay);
-                pwm_val = 0;
-            } else {
-                if (led_state == current_state) {
-                    current_state = !current_state;
-                }
-            }
-            if (led_transition_delay == 0) {
-                analogWrite(D5, led_state ? 0xFF : 0);
-                current_state = led_state;
-            } else {
-                for (; pwm_val < 0xFF; ++pwm_val) {
-                    analogWrite(D5, current_state ? 0xFF - pwm_val : pwm_val);
-                    PT_WAIT(thread_context, led_transition_delay);
-                }
-                current_state = led_state;
-            }
+    if (pwm_val == 0xFF) {
+        if (led_state == current_state) {
+            PT_STOP(thread_context);
+        }
+        delay(led_transition_delay);
+        pwm_val = 0;
+    } else {
+        if (led_state == current_state) {
+            current_state = !current_state;
+        }
+    }
+    if (led_transition_delay == 0) {
+        analogWrite(LED_PIN, led_state ? 0xFF : 0);
+        current_state = led_state;
+    } else {
+        for (; pwm_val < 0xFF; ++pwm_val) {
+            analogWrite(LED_PIN, current_state ? 0xFF - pwm_val : pwm_val);
+            PT_WAIT(thread_context, led_transition_delay);
+        }
+        current_state = led_state;
+    }
     PT_END(thread_context);
 }
 
@@ -540,86 +566,86 @@ PT_THREAD(entries_processing) {
     static bool is_catched = false;
     PT_BEGIN(thread_context);
 
-            while (true) {
+    while (true) {
 
-                time_tmp = ds1307::time(0);
-                if (time_tmp == -1) {
+        time_tmp = ds1307::time(0);
+        if (time_tmp == -1) {
+            PT_EXIT(thread_context);
+        }
+
+
+        //LOG_DEBUG("IN cache", entriesQueue.size());
+        Serial.println(time_tmp);
+        curr_min = std::localtime(&time_tmp)->tm_hour * 60 + std::localtime(&time_tmp)->tm_min;
+
+
+        if (!is_catched && !is_processing) {
+            if (is_cache_empty()) {
+                if (cache() == 0) {
+                    LOG_DEBUG("No entries in cache");
+                    PT_WAIT(thread_context, 60 * 1000);
                     PT_EXIT(thread_context);
                 }
-
-
-                //LOG_DEBUG("IN cache", entriesQueue.size());
-                Serial.println(time_tmp);
-                curr_min = std::localtime(&time_tmp)->tm_hour * 60 + std::localtime(&time_tmp)->tm_min;
-
-
-                if (!is_catched && !is_processing) {
-                    if (is_cache_empty()) {
-                        if (cache() == 0) {
-                            LOG_DEBUG("No entries in cache");
-                            PT_WAIT(thread_context, 60 * 1000);
-                            PT_EXIT(thread_context);
-                        }
-                    }
-                    item = cache_top();
-                    is_catched = true;
-                }
-
-                LOG_DEBUG("Current time", curr_min, "Current item", item.start, item.end);
-                if (curr_min >= item.end) {
-                    cache_pop(item);
-                    is_processing = false;
-                    is_catched = false;
-                    set_led(false);
-                } else if (curr_min >= static_cast<uint32_t>(item.end - item.transition_time)) {
-                    if (!is_processing) {
-                        auto led_transition_delay3 = item.transition_time * 60 * 1000 / 0xFF;
-                        curr_min -= item.end - item.transition_time;
-                        curr_min *= 60 * 1000;
-                        curr_min /= led_transition_delay3;
-                        set_led(false, item.transition_time * 60 * 1000, curr_min);
-                        is_processing = true;
-                    } else {
-                        set_led(false, item.transition_time * 60 * 1000, curr_min);
-                    }
-                } else if (curr_min >= item.start) {
-                    if (!is_processing) {
-                        auto led_transition_delay3 = item.transition_time * 60 * 1000 / 0xFF;
-                        LOG_DEBUG("Transition", led_transition_delay3, item.transition_time);
-                        curr_min -= item.start;
-                        LOG_DEBUG("Elapsed time", curr_min);
-                        if (curr_min >= item.transition_time) {
-                            set_led(true);
-                        } else {
-                            curr_min *= 60 * 1000;
-                            curr_min /= led_transition_delay3;
-                            LOG_DEBUG("PWM", curr_min);
-                            set_led(true, item.transition_time * 60 * 1000, curr_min);
-                        }
-                        is_processing = true;
-                    }
-                }
-                PT_WAIT(thread_context, 60 * 1000);
             }
+            item = cache_top();
+            is_catched = true;
+        }
+
+        LOG_DEBUG("Current time", curr_min, "Current item", item.start, item.end);
+        if (curr_min >= item.end) {
+            cache_pop(item);
+            is_processing = false;
+            is_catched = false;
+            set_led(false);
+        } else if (curr_min >= static_cast<uint32_t>(item.end - item.transition_time)) {
+            if (!is_processing) {
+                auto led_transition_delay3 = item.transition_time * 60 * 1000 / 0xFF;
+                curr_min -= item.end - item.transition_time;
+                curr_min *= 60 * 1000;
+                curr_min /= led_transition_delay3;
+                set_led(false, item.transition_time * 60 * 1000, curr_min);
+                is_processing = true;
+            } else {
+                set_led(false, item.transition_time * 60 * 1000, curr_min);
+            }
+        } else if (curr_min >= item.start) {
+            if (!is_processing) {
+                auto led_transition_delay3 = item.transition_time * 60 * 1000 / 0xFF;
+                LOG_DEBUG("Transition", led_transition_delay3, item.transition_time);
+                curr_min -= item.start;
+                LOG_DEBUG("Elapsed time", curr_min);
+                if (curr_min >= item.transition_time) {
+                    set_led(true);
+                } else {
+                    curr_min *= 60 * 1000;
+                    curr_min /= led_transition_delay3;
+                    LOG_DEBUG("PWM", curr_min);
+                    set_led(true, item.transition_time * 60 * 1000, curr_min);
+                }
+                is_processing = true;
+            }
+        }
+        PT_WAIT(thread_context, 60 * 1000);
+    }
     PT_END(thread_context);
 }
 
 PT_THREAD(clock_manager) {
     static async_wait delay(0);
     PT_BEGIN(thread_context);
-            while (true) {
-                if (!ntp_client.time()) {
-                    LOG_ERROR("NTP Failed ");
-                    PT_EXIT(thread_context);
-                }
-                if (!ds1307::is_enabled()) {
-                    LOG_ERROR("DS1307 is not enabled");
-                    ds1307::set_oscillator(true);
-                }
-                ds1307::set_time(ntp_client.time().value());
-                PT_WAIT(thread_context, 12 * 60 * 60 * 1000);
-                LOG_INFO("Time updated");
-            }
+    while (true) {
+        if (!ntp_client.time()) {
+            LOG_ERROR("NTP Failed ");
+            PT_EXIT(thread_context);
+        }
+        if (!ds1307::is_enabled()) {
+            LOG_ERROR("DS1307 is not enabled");
+            ds1307::set_oscillator(true);
+        }
+        ds1307::set_time(ntp_client.time().value());
+        PT_WAIT(thread_context, 12 * 60 * 60 * 1000);
+        LOG_INFO("Time updated");
+    }
     PT_END(thread_context);
 }
 
